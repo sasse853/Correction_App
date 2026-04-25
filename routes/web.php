@@ -61,21 +61,18 @@ Route::middleware(['auth', 'check.active'])->group(function () {
         Route::get('/dashboard', [AdminController::class, 'dashboard'])->name('dashboard');
 
         // Gestion des utilisateurs
-        Route::prefix('users')->name('users.')->group(function () {
+       Route::prefix('users')->name('users.')->group(function () {
             Route::get('/',             [AdminController::class, 'users'])->name('index');
-            // Alias pour la route utilisée dans les redirections
-            Route::get('/',             [AdminController::class, 'users'])->name('');
+            // SUPPRIME la ligne dupliquée ->name('')
             Route::get('/create',       [AdminController::class, 'createUser'])->name('create');
             Route::post('/',            [AdminController::class, 'storeUser'])->name('store');
             Route::get('/{user}/edit',  [AdminController::class, 'editUser'])->name('edit');
             Route::put('/{user}',       [AdminController::class, 'updateUser'])->name('update');
-            // Bascule actif/inactif d'un compte
             Route::patch('/{user}/toggle', [AdminController::class, 'toggleUserStatus'])->name('toggle');
         });
     });
 
-    // Alias pour la liste des utilisateurs (utilisé dans les redirections)
-    Route::get('/admin/users', [AdminController::class, 'users'])->middleware('role:admin')->name('admin.users');
+    
 
     // ── 2b. ROUTES EMPLOYÉ ───────────────────────────────────────
     // Accessible uniquement au rôle "employe"
@@ -130,7 +127,7 @@ Route::middleware(['auth', 'check.active'])->group(function () {
         // Export en Excel
         Route::get('/export/excel',  [AuditLogController::class, 'exportExcel'])->name('export.excel');
         // Export en PDF
-        Route::get('/export/pdf',    [AuditLogController::class, 'exportPdf'])->name('audit.export.pdf');
+        Route::get('/export/pdf',    [AuditLogController::class, 'exportPdf'])->name('export.pdf');
     });
 
     // ── 2e. ROUTES ADMIN — Accès aux logs ────────────────────────

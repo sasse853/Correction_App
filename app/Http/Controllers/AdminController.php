@@ -132,7 +132,7 @@ class AdminController extends Controller
             'valeur_appliquee' => "Création du compte : {$user->email} (rôle : {$validated['role']})",
         ]);
 
-        return redirect()->route('admin.users')
+        return redirect()->route('admin.users.index')
             ->with('success', "Compte de {$user->name} créé avec succès.");
     }
 
@@ -178,7 +178,7 @@ class AdminController extends Controller
             'valeur_appliquee' => "Modification du compte : {$user->email}",
         ]);
 
-        return redirect()->route('admin.users')
+        return redirect()->route('admin.users.index')
             ->with('success', "Compte de {$user->name} mis à jour.");
     }
 
