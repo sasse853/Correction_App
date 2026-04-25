@@ -129,89 +129,160 @@
 <div style="display:grid; grid-template-columns:1fr 360px; gap:20px; align-items:start;">
 
     {{-- ══════════════════════════════════════════════
-         COLONNE GAUCHE : Corrections à réviser
-         Le supérieur consulte ligne par ligne ce qui
-         va être appliqué sur DB2 avant de décider.
+         COLONNE GAUCHE : Vue des données
+         - Onglet 1 : Données brutes du fichier Excel
+         - Onglet 2 : Corrections à appliquer sur DB2
          ══════════════════════════════════════════════ --}}
     <div class="card">
 
+        {{-- En-tête avec onglets --}}
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
-            <h3 style="font-family:'Syne',sans-serif; font-size:1rem; font-weight:700; margin:0;">
-                Lignes à appliquer sur DB2
-            </h3>
+            <div>
+                <div style="display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:16px;">
+                    {{-- Onglet : Données du fichier --}}
+                    <button type="button" 
+                            class="tab-button" 
+                            data-tab="excel-data"
+                            style="padding:10px 16px; border:none; background:none; font-size:0.9rem; font-weight:600; color:var(--text-muted); border-bottom:3px solid transparent; cursor:pointer; transition:all 0.2s;"
+                            onclick="switchTab('excel-data', this)">
+                        📄 Données du fichier
+                    </button>
+
+                    {{-- Onglet : Corrections à appliquer --}}
+                    <button type="button" 
+                            class="tab-button"
+                            data-tab="corrections"
+                            style="padding:10px 16px; border:none; background:none; font-size:0.9rem; font-weight:600; color:var(--accent-light); border-bottom:3px solid var(--accent-light); cursor:pointer; transition:all 0.2s;"
+                            onclick="switchTab('corrections', this)">
+                        ✅ Corrections à appliquer
+                    </button>
+                </div>
+            </div>
             <span style="font-size:0.8rem; color:var(--text-muted);">
-                {{ $corrections->total() }} ligne(s) — version {{ $submission->version }}
+                Version {{ $submission->version }}
             </span>
         </div>
 
-        @if($corrections->isEmpty())
-            <div style="text-align:center; padding:40px; color:var(--text-muted);">
-                <p style="font-size:0.875rem;">Aucune correction à afficher.</p>
-            </div>
-        @else
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Ligne</th>
-                            <th>Table DB2</th>
-                            <th>Clé primaire</th>
-                            <th>Champ</th>
-                            <th>Nouvelle valeur</th>
-                            <th>Statut</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach($corrections as $correction)
-                            <tr>
-                                <td style="color:var(--text-muted); font-size:0.8rem; text-align:center;">
-                                    {{ $correction->ligne_ref }}
-                                </td>
-                                <td>
-                                    <code style="background:rgba(79,124,255,0.1); color:var(--accent-light); padding:2px 7px; border-radius:5px; font-size:0.8rem;">
-                                        {{ $correction->table_db2 }}
-                                    </code>
-                                </td>
-                                <td style="font-size:0.8rem; color:var(--text-muted);">
-                                    {{ $correction->cle_primaire ?? '—' }}
-                                </td>
-                                <td style="font-weight:500; font-size:0.875rem;">
-                                    {{ $correction->champ }}
-                                </td>
-                                <td style="font-size:0.875rem;">
-                                    {{ $correction->valeur_correction }}
-                                </td>
-                                <td>
-                                    @if($correction->push_statut === 'OK')
-                                        <span class="badge badge-emerald">OK</span>
-                                    @elseif($correction->push_statut === 'ERREUR')
-                                        <span class="badge badge-red" title="{{ $correction->push_message }}">Erreur</span>
-                                    @else
-                                        <span class="badge badge-gray">En attente</span>
-                                    @endif
-                                </td>
-                            </tr>
-                            {{-- Message d'erreur détaillé si push en erreur --}}
-                            @if($correction->push_statut === 'ERREUR' && $correction->push_message)
-                                <tr>
-                                    <td colspan="6" style="padding:4px 16px 10px; background:rgba(239,68,68,0.04);">
-                                        <span style="font-size:0.75rem; color:#f87171;">
-                                            ↳ {{ $correction->push_message }}
-                                        </span>
-                                    </td>
-                                </tr>
-                            @endif
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
+        {{-- ─────────────────────────────────────────────────────
+             ONGLET 1 : Données brutes du fichier Excel
+             ───────────────────────────────────────────────────── --}}
+        <div id="excel-data-tab" class="tab-content" style="display:none;">
+            @if(empty($excelData))
+                <div style="text-align:center; padding:40px; color:var(--text-muted);">
+                    <p style="font-size:0.875rem;">Impossible de lire le fichier Excel.</p>
+                </div>
+            @else
+                <div style="margin-bottom:12px; padding:10px; background:rgba(79,124,255,0.08); border-radius:8px;">
+                    <span style="font-size:0.8rem; color:var(--text-muted);">
+                        {{ count($excelData) }} ligne(s) × {{ count($excelColumns) }} colonne(s)
+                    </span>
+                </div>
 
-            @if($corrections->hasPages())
-                <div style="margin-top:16px; display:flex; justify-content:center;">
-                    {{ $corrections->links() }}
+                <div class="table-wrap" style="max-height:600px; overflow:auto;">
+                    <table>
+                        <thead style="position:sticky; top:0; background:var(--bg-card); z-index:10;">
+                            <tr>
+                                <th style="width:50px; text-align:center;">#</th>
+                                @foreach($excelColumns as $column)
+                                    <th style="min-width:120px;">{{ $column }}</th>
+                                @endforeach
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach($excelData as $rowIndex => $row)
+                                <tr>
+                                    <td style="text-align:center; font-size:0.8rem; color:var(--text-muted); width:50px;">
+                                        {{ $rowIndex + 1 }}
+                                    </td>
+                                    @foreach($excelColumns as $column)
+                                        @php
+                                            $value = is_object($row) ? ($row->$column ?? '—') : ($row[$column] ?? '—');
+                                        @endphp
+                                        <td style="font-size:0.85rem; word-break:break-word;">
+                                            {{ $value }}
+                                        </td>
+                                    @endforeach
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
                 </div>
             @endif
-        @endif
+        </div>
+
+        {{-- ─────────────────────────────────────────────────────
+             ONGLET 2 : Corrections à appliquer sur DB2
+             ───────────────────────────────────────────────────── --}}
+        <div id="corrections-tab" class="tab-content" style="display:block;">
+            @if($corrections->isEmpty())
+                <div style="text-align:center; padding:40px; color:var(--text-muted);">
+                    <p style="font-size:0.875rem;">Aucune correction à appliquer.</p>
+                </div>
+            @else
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Ligne</th>
+                                <th>Table DB2</th>
+                                <th>Clé primaire</th>
+                                <th>Champ</th>
+                                <th>Nouvelle valeur</th>
+                                <th>Statut</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach($corrections as $correction)
+                                <tr>
+                                    <td style="color:var(--text-muted); font-size:0.8rem; text-align:center;">
+                                        {{ $correction->ligne_ref }}
+                                    </td>
+                                    <td>
+                                        <code style="background:rgba(79,124,255,0.1); color:var(--accent-light); padding:2px 7px; border-radius:5px; font-size:0.8rem;">
+                                            {{ $correction->table_db2 }}
+                                        </code>
+                                    </td>
+                                    <td style="font-size:0.8rem; color:var(--text-muted);">
+                                        {{ $correction->cle_primaire ?? '—' }}
+                                    </td>
+                                    <td style="font-weight:500; font-size:0.875rem;">
+                                        {{ $correction->champ }}
+                                    </td>
+                                    <td style="font-size:0.875rem;">
+                                        {{ $correction->valeur_correction }}
+                                    </td>
+                                    <td>
+                                        @if($correction->push_statut === 'OK')
+                                            <span class="badge badge-emerald">OK</span>
+                                        @elseif($correction->push_statut === 'ERREUR')
+                                            <span class="badge badge-red" title="{{ $correction->push_message }}">Erreur</span>
+                                        @else
+                                            <span class="badge badge-gray">En attente</span>
+                                        @endif
+                                    </td>
+                                </tr>
+                                {{-- Message d'erreur détaillé si push en erreur --}}
+                                @if($correction->push_statut === 'ERREUR' && $correction->push_message)
+                                    <tr>
+                                        <td colspan="6" style="padding:4px 16px 10px; background:rgba(239,68,68,0.04);">
+                                            <span style="font-size:0.75rem; color:#f87171;">
+                                                ↳ {{ $correction->push_message }}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                @endif
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+
+                @if($corrections->hasPages())
+                    <div style="margin-top:16px; display:flex; justify-content:center;">
+                        {{ $corrections->links() }}
+                    </div>
+                @endif
+            @endif
+        </div>
 
     </div>
 
@@ -442,5 +513,31 @@
     @if($errors->has('commentaire'))
         openRejectModal();
     @endif
+
+    /**
+     * Gestion des onglets : "Données du fichier" vs "Corrections à appliquer"
+     */
+    function switchTab(tabName, buttonElement) {
+        // Masquer tous les onglets
+        const tabs = document.querySelectorAll('.tab-content');
+        tabs.forEach(tab => tab.style.display = 'none');
+
+        // Afficher l'onglet sélectionné
+        const selectedTab = document.getElementById(tabName + '-tab');
+        if (selectedTab) {
+            selectedTab.style.display = 'block';
+        }
+
+        // Mettre à jour le style des boutons d'onglets
+        const buttons = document.querySelectorAll('.tab-button');
+        buttons.forEach(btn => {
+            btn.style.color = 'var(--text-muted)';
+            btn.style.borderBottomColor = 'transparent';
+        });
+
+        // Styler le bouton actif
+        buttonElement.style.color = 'var(--accent-light)';
+        buttonElement.style.borderBottomColor = 'var(--accent-light)';
+    }
 </script>
 @endpush

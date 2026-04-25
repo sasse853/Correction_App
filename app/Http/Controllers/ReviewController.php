@@ -83,7 +83,36 @@ class ReviewController extends Controller
         // Historique complet des révisions
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
-        return view('superior.submissions.show', compact('submission', 'corrections', 'reviews'));
+        // Lecture du fichier Excel pour afficher les données brutes
+        $excelData = [];
+        $excelColumns = [];
+        
+        try {
+            if (file_exists($submission->file_path)) {
+                $rows = (new \Rap2hpoutre\FastExcel\FastExcel)->import($submission->file_path);
+                
+                // Convertir l'itérateur en array
+                $excelData = $rows->toArray();
+                
+                // Récupérer les en-têtes (clés du premier enregistrement)
+                if (! empty($excelData)) {
+                    $firstRow = $excelData[0];
+                    
+                    // FastExcel retourne des objets stdClass, donc on accède aux propriétés
+                    if (is_object($firstRow)) {
+                        $excelColumns = array_keys((array) $firstRow);
+                    } elseif (is_array($firstRow)) {
+                        $excelColumns = array_keys($firstRow);
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            // Si la lecture échoue, on affiche juste les corrections
+            $excelData = [];
+            $excelColumns = [];
+        }
+
+        return view('superior.submissions.show', compact('submission', 'corrections', 'reviews', 'excelData', 'excelColumns'));
     }
 
     /**
