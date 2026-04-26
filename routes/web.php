@@ -115,6 +115,7 @@ Route::middleware(['auth', 'check.active'])->group(function () {
             // Rejeter avec commentaires
             Route::post('/{submission}/reject',  [ReviewController::class, 'reject'])->name('reject');
         });
+        Route::get('/submissions/{submission}/download', [ReviewController::class, 'download'])->name('submissions.download');
     });
 
     // ── 2d. ROUTES AUDIT LOGS ────────────────────────────────────

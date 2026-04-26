@@ -87,30 +87,55 @@ class ReviewController extends Controller
         $excelData = [];
         $excelColumns = [];
         
-        try {
-            if (file_exists($submission->file_path)) {
-                $rows = (new \Rap2hpoutre\FastExcel\FastExcel)->import($submission->file_path);
-                
-                // Convertir l'itérateur en array
-                $excelData = $rows->toArray();
-                
-                // Récupérer les en-têtes (clés du premier enregistrement)
-                if (! empty($excelData)) {
-                    $firstRow = $excelData[0];
-                    
-                    // FastExcel retourne des objets stdClass, donc on accède aux propriétés
-                    if (is_object($firstRow)) {
-                        $excelColumns = array_keys((array) $firstRow);
-                    } elseif (is_array($firstRow)) {
-                        $excelColumns = array_keys($firstRow);
-                    }
+        
+            try {
+        $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
+
+        if (file_exists($cheminAbsolu)) {
+            // Lire toutes les lignes sans traitement
+            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($cheminAbsolu);
+            $feuille     = $spreadsheet->getActiveSheet();
+            $toutesLignes = $feuille->toArray(null, true, true, false);
+
+            // Trouver la ligne d'en-têtes — c'est la première ligne non vide
+            // qui contient plusieurs colonnes (pas un titre sur une seule cellule)
+            $indexEntetes = null;
+            foreach ($toutesLignes as $i => $ligne) {
+                $colonnesRemplies = count(array_filter($ligne, fn($v) => !is_null($v) && $v !== ''));
+                if ($colonnesRemplies >= 3) {
+                    $indexEntetes = $i;
+                    break;
                 }
             }
-        } catch (\Exception $e) {
-            // Si la lecture échoue, on affiche juste les corrections
-            $excelData = [];
-            $excelColumns = [];
+
+            if ($indexEntetes !== null) {
+                // Les en-têtes
+                $excelColumns = array_values(array_filter(
+                    $toutesLignes[$indexEntetes],
+                    fn($v) => !is_null($v) && $v !== ''
+                ));
+
+                // Les données — tout ce qui suit les en-têtes
+                $lignesDonnees = array_slice($toutesLignes, $indexEntetes + 1);
+
+                // Construire un tableau associatif pour chaque ligne
+                foreach ($lignesDonnees as $ligne) {
+                    $valeurs = array_values($ligne);
+                    // Ignorer les lignes complètement vides
+                    if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
+                        continue;
+                    }
+                    $excelData[] = array_combine(
+                        $excelColumns,
+                        array_slice($valeurs, 0, count($excelColumns))
+                    );
+                }
+            }
         }
+    } catch (\Exception $e) {
+        $excelData    = [];
+        $excelColumns = [];
+    }
 
         return view('superior.submissions.show', compact('submission', 'corrections', 'reviews', 'excelData', 'excelColumns'));
     }
@@ -261,4 +286,15 @@ class ReviewController extends Controller
 
         return view('superior.submissions.index', compact('submissions', 'employes'));
     }
+
+    public function download(Submission $submission)
+{
+    $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
+
+    if (! file_exists($cheminAbsolu)) {
+        return back()->with('erreur', 'Fichier introuvable.');
+    }
+
+    return response()->download($cheminAbsolu, $submission->file_original_name);
+}
 }
