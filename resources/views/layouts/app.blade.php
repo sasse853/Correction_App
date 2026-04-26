@@ -295,12 +295,10 @@
 <body>
 
 {{-- ═══════════════════════════════════════════════════════
-     SIDEBAR — Navigation latérale fixe
-     Contenu adapté selon le rôle de l'utilisateur connecté
+     SIDEBAR
      ═══════════════════════════════════════════════════════ --}}
 <aside class="sidebar">
 
-    {{-- Logo --}}
     <div class="sidebar-logo">
         <div style="display:flex;align-items:center;gap:10px;">
             <div style="width:32px;height:32px;background:linear-gradient(135deg,#4f7cff,#7b9fff);border-radius:8px;display:flex;align-items:center;justify-content:center;">
@@ -310,13 +308,11 @@
             </div>
             <span>DataCorrection</span>
         </div>
-        {{-- Rôle de l'utilisateur connecté --}}
         <div style="margin-top:8px;font-size:0.72rem;color:var(--text-muted);letter-spacing:0.5px;">
             {{ auth()->user()->getRoleLabel() }} — {{ auth()->user()->name }}
         </div>
     </div>
 
-    {{-- Navigation selon le rôle --}}
     <nav style="flex:1;padding:12px 0;overflow-y:auto;">
 
         {{-- ── ADMIN ─────────────────────────────────── --}}
@@ -349,6 +345,11 @@
             Tous les dossiers
         </a>
 
+        {{--
+            Audit Logs : accessible à l'admin UNIQUEMENT.
+            Supprimé du bloc supérieur — un supérieur ne doit pas
+            avoir accès à l'historique de connexion des autres utilisateurs.
+        --}}
         <a href="{{ route('audit.index') }}"
            class="nav-item {{ request()->routeIs('audit*') ? 'active' : '' }}">
             <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -379,13 +380,10 @@
             Tous les dossiers
         </a>
 
-        <a href="{{ route('audit.index') }}"
-           class="nav-item {{ request()->routeIs('audit*') ? 'active' : '' }}">
-            <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-            </svg>
-            Audit Logs
-        </a>
+        {{--
+            PAS de lien Audit Logs ici — le supérieur n'a pas
+            accès au journal d'audit. Restreint à l'admin uniquement.
+        --}}
         @endrole
 
         {{-- ── EMPLOYÉ ─────────────────────────────────── --}}
@@ -420,7 +418,6 @@
 
     </nav>
 
-    {{-- Déconnexion en bas de sidebar --}}
     <div style="padding:16px;border-top:1px solid var(--border);">
         <form method="POST" action="{{ route('logout') }}">
             @csrf
@@ -435,30 +432,25 @@
 </aside>
 
 {{-- ═══════════════════════════════════════════════
-     TOPBAR — Barre supérieure avec notifications
+     TOPBAR
      ═══════════════════════════════════════════════ --}}
 <header class="topbar">
-    {{-- Titre de la page courante --}}
     <h1 style="font-size:1.05rem;font-weight:700;font-family:'Syne',sans-serif;letter-spacing:-0.3px;">
         @yield('page-title', 'Tableau de bord')
     </h1>
 
     <div style="display:flex;align-items:center;gap:16px;">
-
-        {{-- Cloche de notifications --}}
         <div style="position:relative;">
             <button style="background:var(--bg-main);border:1px solid var(--border);border-radius:9px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-muted);">
                 <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                     <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/>
                 </svg>
             </button>
-            {{-- Affiche le point rouge si des notifications non lues existent --}}
             @if(auth()->user()->unreadNotifications->count() > 0)
                 <span class="notif-dot"></span>
             @endif
         </div>
 
-        {{-- Avatar utilisateur --}}
         <div style="display:flex;align-items:center;gap:10px;">
             <div style="width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--accent-light));border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:0.85rem;color:white;">
                 {{ strtoupper(substr(auth()->user()->name, 0, 1)) }}
@@ -472,11 +464,10 @@
 </header>
 
 {{-- ═══════════════════════════════════════════════
-     CONTENU PRINCIPAL — Zone centrale de la page
+     CONTENU PRINCIPAL
      ═══════════════════════════════════════════════ --}}
 <main class="main-content">
 
-    {{-- Messages flash (succès, erreur, warning) --}}
     @if(session('success'))
         <div class="alert alert-success">
             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -508,8 +499,10 @@
         </div>
     @endif
 
-    {{-- Contenu spécifique à chaque page --}}
     @yield('content')
+
+    {{-- Zone pour les scripts spécifiques à chaque page --}}
+    @stack('scripts')
 
 </main>
 

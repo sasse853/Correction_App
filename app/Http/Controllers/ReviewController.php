@@ -298,4 +298,31 @@ class ReviewController extends Controller
 
         return view('superior.submissions.index', compact('submissions', 'employes'));
     }
+
+    /**
+ * Réinitialise une ligne à PENDING pour permettre de la re-traiter.
+ */
+    public function resetLine(Request $request, Submission $submission, StagingCorrection $correction)
+    {
+        if (
+            $correction->submission_id !== $submission->id ||
+            $correction->version !== $submission->version
+        ) {
+            return response()->json(['error' => 'Correction invalide.'], 403);
+        }
+
+        // On mémorise l'ancien statut pour que le JS sache
+        // si c'était une validation ou un refus à annuler
+        $ancienStatut = $correction->statut_revision;
+
+        $correction->update([
+            'statut_revision' => 'PENDING',
+            'commentaire_sup' => null,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'was'     => $ancienStatut, // 'VALIDE' ou 'REFUSE'
+        ]);
+    }
 }

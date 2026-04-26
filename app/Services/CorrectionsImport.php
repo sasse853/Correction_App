@@ -9,111 +9,95 @@ use Rap2hpoutre\FastExcel\FastExcel;
 /**
  * CorrectionsImport
  *
- * Lit le fichier Excel soumis par l'employé et insère
- * chaque ligne dans la table staging_corrections.
+ * Parse le fichier Excel et insère les lignes dans staging_corrections.
  *
- * ADAPTATION fast-excel :
- * La version originale utilisait Maatwebsite\Excel qui n'est
- * pas compatible avec PHP 8.5. On utilise ici
- * rap2hpoutre/fast-excel qui fonctionne parfaitement.
+ * MODE TEST : accepte n'importe quels en-têtes.
+ * Le service prend les colonnes dans l'ordre où elles apparaissent
+ * dans le fichier et les mappe ainsi :
+ *   - Colonne 1 → table_db2
+ *   - Colonne 2 → cle_primaire
+ *   - Colonne 3 → champ
+ *   - Colonne 4 → valeur_correction
+ *   - Colonnes supplémentaires → ignorées
  *
- * Différence majeure avec Maatwebsite :
- *   - Maatwebsite : classe qui implémente des interfaces,
- *     appelée via Excel::import(new CorrectionsImport(), $file)
- *   - FastExcel    : on instancie FastExcel et on appelle
- *     ->import($file, callback) directement
+ * Si le fichier a moins de 4 colonnes, les colonnes manquantes
+ * sont remplies avec des valeurs par défaut pour ne pas bloquer.
  *
- * Format attendu du fichier Excel (première ligne = en-têtes) :
- *   | table_db2 | cle_primaire | champ | valeur |
+ * En production, remplacer ce mapping par les vrais noms de colonnes.
  */
 class CorrectionsImport
 {
-    /**
-     * On injecte la soumission pour pouvoir lier chaque
-     * correction à son dossier et à sa version.
-     */
     public function __construct(private Submission $submission)
     {
     }
 
     /**
-     * Lance l'import du fichier Excel vers staging_corrections.
+     * Lance l'import du fichier Excel.
      *
-     * FastExcel lit le fichier ligne par ligne et appelle
-     * le callback pour chaque ligne. On y insère la correction
-     * en base si les colonnes obligatoires sont présentes.
-     *
-     * @param  mixed  $file  Chemin du fichier ou UploadedFile Laravel
-     * @return int           Nombre de lignes importées avec succès
-     * @throws \Exception    Si le fichier est illisible ou mal formaté
+     * @param  mixed  $file  Chemin ou UploadedFile
+     * @return int           Nombre de lignes importées
      */
     public function import($file): int
     {
         $count = 0;
 
-        /*
-         * FastExcel::import() lit le fichier et appelle le callback
-         * pour chaque ligne sous forme de tableau associatif.
-         * Les clés du tableau = les en-têtes de la première ligne Excel.
-         *
-         * Exemple de $row :
-         * [
-         *   'table_db2'    => 'CLIENT',
-         *   'cle_primaire' => 'ID=1042',
-         *   'champ'        => 'NOM',
-         *   'valeur'       => 'Dupont',
-         * ]
-         */
         (new FastExcel)->import($file, function (array $row) use (&$count) {
 
             /*
-             * On nettoie les clés du tableau pour éviter les problèmes
-             * d'espaces ou de casse dans les en-têtes Excel.
-             * Ex: "Table_DB2 " devient "table_db2"
+             * On récupère les valeurs du tableau dans l'ordre
+             * sans se soucier des noms des clés (en-têtes).
+             * array_values() supprime les clés et reindexe à partir de 0.
+             *
+             * Exemple :
+             *   ['ID' => 1, 'Date' => '...', 'Agent' => '...', 'Action' => '...']
+             *   devient [1, '...', '...', '...']
+             *
+             * On peut ainsi prendre position 0, 1, 2, 3 quelle que soit
+             * la dénomination des colonnes.
              */
-            $row = array_combine(
-                array_map(fn($key) => strtolower(trim($key)), array_keys($row)),
-                array_values($row)
-            );
+            $valeurs = array_values($row);
 
             /*
-             * Validation minimale : on ignore les lignes vides
-             * ou celles qui n'ont pas les colonnes obligatoires.
-             * On ne lève pas d'exception pour ne pas bloquer
-             * l'import entier à cause d'une ligne vide.
+             * Ignore les lignes complètement vides.
+             * array_filter supprime les valeurs null/vides,
+             * si le résultat est vide c'est une ligne blanche.
              */
-            if (
-                empty($row['table_db2']) ||
-                empty($row['champ'])     ||
-                ! isset($row['valeur'])
-            ) {
-                return null; // FastExcel ignore les retours null
+            if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
+                return null;
             }
 
             /*
-             * Insertion en base dans staging_corrections.
-             * Chaque ligne est liée à la soumission et à sa version
-             * pour permettre la traçabilité multi-versions.
+             * Mapping positionnel :
+             *   Position 0 → table_db2       (obligatoire)
+             *   Position 1 → cle_primaire     (facultatif)
+             *   Position 2 → champ            (obligatoire)
+             *   Position 3 → valeur_correction (obligatoire)
              *
-             * push_statut = 'PENDING' par défaut car le push DB2
-             * n'a pas encore eu lieu (il se fait à l'approbation).
+             * On utilise ?? pour fournir des valeurs par défaut
+             * si la colonne n'existe pas dans le fichier.
              */
+            $table_db2         = isset($valeurs[0]) ? (string) $valeurs[0] : 'INCONNU';
+            $cle_primaire      = isset($valeurs[1]) ? (string) $valeurs[1] : null;
+            $champ             = isset($valeurs[2]) ? (string) $valeurs[2] : 'CHAMP_' . ($count + 1);
+            $valeur_correction = isset($valeurs[3]) ? (string) $valeurs[3] : '';
+
             StagingCorrection::create([
-                'submission_id'      => $this->submission->id,
-                'version'            => $this->submission->version,
-                'ligne_ref'          => $count + 2, // +2 car ligne 1 = en-têtes
-                'table_db2'          => strtoupper(trim($row['table_db2'])),
-                'champ'              => strtoupper(trim($row['champ'])),
-                'valeur_correction'  => trim($row['valeur']),
-                'cle_primaire'       => isset($row['cle_primaire']) ? trim($row['cle_primaire']) : null,
-                'appliquee'          => false,
-                'push_statut'        => 'PENDING',
-                'created_at'         => now(),
+                'submission_id'     => $this->submission->id,
+                'version'           => $this->submission->version,
+                'ligne_ref'         => $count + 2, // +2 car ligne 1 = en-têtes
+                'table_db2'         => strtoupper(trim($table_db2)),
+                'champ'             => strtoupper(trim($champ)),
+                'valeur_correction' => trim($valeur_correction),
+                'cle_primaire'      => $cle_primaire ? trim($cle_primaire) : null,
+                'appliquee'         => false,
+                'push_statut'       => 'PENDING',
+                'statut_revision'   => 'PENDING',
+                'created_at'        => now(),
             ]);
 
             $count++;
 
-            return null; // FastExcel n'utilise pas la valeur de retour
+            return null;
         });
 
         return $count;

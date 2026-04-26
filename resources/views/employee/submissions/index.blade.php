@@ -2,14 +2,14 @@
     ============================================================
     VUE : employee/submissions/index.blade.php
     ------------------------------------------------------------
-    Liste tous les dossiers soumis par l'employé connecté.
-    C'est aussi le dashboard de l'employé (route employe.dashboard
-    pointe vers SubmissionController@index).
+    Liste tous les dossiers de l'employé connecté.
+
+    MISE À JOUR : Ajout du bouton "Supprimer" pour les dossiers
+    EN_ATTENTE uniquement. Un dossier déjà en révision ne peut
+    plus être supprimé.
 
     Variables transmises par SubmissionController@index :
       - $submissions → LengthAwarePaginator (paginé par 10)
-                       triés du plus récent au plus ancien
-                       appartenant uniquement à auth()->user()
     ============================================================
 --}}
 
@@ -20,9 +20,7 @@
 
 @section('content')
 
-{{-- ──────────────────────────────────────────────────────────
-     EN-TÊTE : Titre + bouton Nouveau dossier
-     ────────────────────────────────────────────────────────── --}}
+{{-- EN-TÊTE --}}
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
     <div>
         <h2 style="font-family:'Syne',sans-serif; font-size:1.3rem; font-weight:700; margin:0 0 4px;">
@@ -32,8 +30,6 @@
             Suivez l'état de vos corrections soumises
         </p>
     </div>
-
-    {{-- Bouton principal : soumettre un nouveau fichier Excel --}}
     <a href="{{ route('employe.submissions.create') }}" class="btn-primary">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
@@ -42,31 +38,16 @@
     </a>
 </div>
 
-{{-- ──────────────────────────────────────────────────────────
-     CARDS DE STATUT RAPIDE
-     Donne à l'employé une vue synthétique de ses dossiers
-     sans qu'il ait à parcourir toute la liste.
-     ────────────────────────────────────────────────────────── --}}
+{{-- CARDS STATS --}}
 @if($submissions->total() > 0)
 <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:24px;">
-
-    {{--
-        On calcule les compteurs par statut directement depuis
-        la collection complète. On utilise une requête séparée
-        pour ne pas être limité par la pagination (10 par page).
-        Mais ici on travaille avec ce qu'on a : $submissions->total()
-        nous donne le total global, pas par statut.
-        On fait donc une petite requête inline pour les stats.
-    --}}
     @php
-        // Compteurs par statut pour les cards — requête légère
         $statsStatut = \App\Models\Submission::where('user_id', auth()->id())
             ->selectRaw('statut, count(*) as total')
             ->groupBy('statut')
             ->pluck('total', 'statut');
     @endphp
 
-    {{-- Card En attente --}}
     <div class="card" style="padding:14px; border-color:rgba(245,158,11,0.25);">
         <p style="font-size:0.7rem; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">En attente</p>
         <p style="font-size:1.6rem; font-weight:800; font-family:'Syne',sans-serif; margin:0; color:#fbbf24;">
@@ -74,7 +55,6 @@
         </p>
     </div>
 
-    {{-- Card En correction (rejetés) --}}
     <div class="card" style="padding:14px; border-color:rgba(251,146,60,0.25);">
         <p style="font-size:0.7rem; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">À corriger</p>
         <p style="font-size:1.6rem; font-weight:800; font-family:'Syne',sans-serif; margin:0; color:#fb923c;">
@@ -82,7 +62,6 @@
         </p>
     </div>
 
-    {{-- Card Terminés avec succès --}}
     <div class="card" style="padding:14px; border-color:rgba(34,197,94,0.25);">
         <p style="font-size:0.7rem; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Terminés</p>
         <p style="font-size:1.6rem; font-weight:800; font-family:'Syne',sans-serif; margin:0; color:#4ade80;">
@@ -90,26 +69,19 @@
         </p>
     </div>
 
-    {{-- Card Total --}}
     <div class="card" style="padding:14px;">
         <p style="font-size:0.7rem; color:var(--text-muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Total</p>
         <p style="font-size:1.6rem; font-weight:800; font-family:'Syne',sans-serif; margin:0; color:var(--text-main);">
             {{ $submissions->total() }}
         </p>
     </div>
-
 </div>
 @endif
 
-{{-- ──────────────────────────────────────────────────────────
-     ALERTE : Dossiers en attente de correction
-     Si l'employé a des dossiers EN_CORRECTION, on l'avertit
-     avec une bannière orange bien visible.
-     ────────────────────────────────────────────────────────── --}}
+{{-- ALERTE dossiers EN_CORRECTION --}}
 @php
     $nbEnCorrection = \App\Models\Submission::where('user_id', auth()->id())
-        ->where('statut', 'EN_CORRECTION')
-        ->count();
+        ->where('statut', 'EN_CORRECTION')->count();
 @endphp
 @if($nbEnCorrection > 0)
     <div class="alert alert-warning" style="margin-bottom:20px;">
@@ -118,18 +90,15 @@
         </svg>
         <span>
             Vous avez <strong>{{ $nbEnCorrection }} dossier(s)</strong> en attente de correction.
-            Consultez les commentaires du supérieur et re-soumettez un fichier corrigé.
+            Consultez les commentaires du supérieur et apportez vos corrections.
         </span>
     </div>
 @endif
 
-{{-- ──────────────────────────────────────────────────────────
-     LISTE DES DOSSIERS
-     ────────────────────────────────────────────────────────── --}}
+{{-- LISTE DES DOSSIERS --}}
 <div class="card">
 
     @if($submissions->isEmpty())
-        {{-- État vide : premier dossier à soumettre --}}
         <div style="text-align:center; padding:60px 20px;">
             <svg width="48" height="48" fill="none" stroke="var(--text-muted)" stroke-width="1.2" viewBox="0 0 24 24" style="margin:0 auto 16px; opacity:0.3;">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
@@ -146,7 +115,6 @@
         </div>
 
     @else
-        {{-- Tableau des dossiers --}}
         <div class="table-wrap">
             <table>
                 <thead>
@@ -162,8 +130,6 @@
                 <tbody>
                     @foreach($submissions as $submission)
                         <tr>
-
-                            {{-- Nom du fichier + date de soumission --}}
                             <td>
                                 <div style="font-weight:600; font-size:0.875rem; margin-bottom:3px;">
                                     {{ $submission->file_original_name }}
@@ -173,21 +139,18 @@
                                 </div>
                             </td>
 
-                            {{-- Numéro de version --}}
                             <td style="text-align:center;">
                                 <span style="font-size:0.8rem; color:var(--text-muted);">
                                     v{{ $submission->version }}
                                 </span>
                             </td>
 
-                            {{-- Nombre de lignes de corrections --}}
                             <td style="text-align:center;">
                                 <span style="font-size:0.875rem; font-weight:600;">
                                     {{ $submission->getTotalCorrections() }}
                                 </span>
                             </td>
 
-                            {{-- Badge de statut --}}
                             <td>
                                 @php
                                     $badgeMap = [
@@ -202,12 +165,6 @@
                                 <span class="badge {{ $badgeMap[$submission->statut] ?? 'badge-gray' }}">
                                     {{ $submission->getStatutLabel() }}
                                 </span>
-
-                                {{--
-                                    Indicateur supplémentaire pour EN_CORRECTION :
-                                    petit texte d'action pour que l'employé comprenne
-                                    immédiatement qu'il doit agir.
-                                --}}
                                 @if($submission->statut === 'EN_CORRECTION')
                                     <div style="font-size:0.72rem; color:#fb923c; margin-top:3px;">
                                         ↳ Action requise
@@ -215,42 +172,75 @@
                                 @endif
                             </td>
 
-                            {{-- Date de dernière mise à jour --}}
                             <td style="font-size:0.8rem; color:var(--text-muted);">
                                 {{ $submission->updated_at->diffForHumans() }}
                             </td>
 
-                            {{-- Bouton d'action --}}
+                            {{-- COLONNE ACTIONS --}}
                             <td>
-                                @if($submission->statut === 'EN_CORRECTION')
-                                    {{--
-                                        Dossier rejeté : bouton orange "Corriger"
-                                        plus visible pour inciter à l'action
-                                    --}}
-                                    <a href="{{ route('employe.submissions.show', $submission) }}"
-                                       style="display:inline-flex; align-items:center; gap:5px; padding:6px 12px; background:rgba(251,146,60,0.15); color:#fb923c; border:1px solid rgba(251,146,60,0.3); border-radius:7px; font-size:0.78rem; font-weight:600; text-decoration:none;">
-                                        <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                                        </svg>
-                                        Corriger
-                                    </a>
-                                @else
-                                    {{-- Autres statuts : bouton "Voir" standard --}}
-                                    <a href="{{ route('employe.submissions.show', $submission) }}"
-                                       class="btn-ghost"
-                                       style="padding:6px 12px; font-size:0.78rem;">
-                                        Voir
-                                    </a>
-                                @endif
-                            </td>
+                                <div style="display:flex; align-items:center; gap:8px;">
 
+                                    {{-- Bouton Corriger (EN_CORRECTION) --}}
+                                    @if($submission->statut === 'EN_CORRECTION')
+                                        <a href="{{ route('employe.submissions.show', $submission) }}"
+                                           style="display:inline-flex; align-items:center; gap:5px; padding:6px 12px; background:rgba(251,146,60,0.15); color:#fb923c; border:1px solid rgba(251,146,60,0.3); border-radius:7px; font-size:0.78rem; font-weight:600; text-decoration:none;">
+                                            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                                                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                                                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                                            </svg>
+                                            Corriger
+                                        </a>
+
+                                    {{-- Bouton Voir (autres statuts) --}}
+                                    @else
+                                        <a href="{{ route('employe.submissions.show', $submission) }}"
+                                           class="btn-ghost"
+                                           style="padding:6px 12px; font-size:0.78rem;">
+                                            Voir
+                                        </a>
+                                    @endif
+
+                                    {{--
+                                        Bouton Supprimer — visible UNIQUEMENT si le statut
+                                        est EN_ATTENTE. Une fois qu'un supérieur a ouvert
+                                        le dossier (EN_REVISION ou autre), la suppression
+                                        est bloquée côté controller ET masquée ici.
+
+                                        On utilise un formulaire DELETE car les liens <a>
+                                        ne supportent pas la méthode DELETE nativement.
+                                        @method('DELETE') génère le champ _method pour Laravel.
+                                    --}}
+                                    @if($submission->statut === 'EN_ATTENTE')
+                                        <form method="POST"
+                                              action="{{ route('employe.submissions.destroy', $submission) }}"
+                                              style="display:inline;"
+                                              onsubmit="return confirm('Supprimer le dossier \"{{ addslashes($submission->file_original_name) }}\" ? Cette action est irréversible.')">
+                                            @csrf
+                                            @method('DELETE')
+                                            <button type="submit"
+                                                    title="Supprimer ce dossier"
+                                                    style="padding:6px 12px; background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.25); border-radius:7px; font-size:0.78rem; font-weight:500; cursor:pointer; font-family:inherit; display:inline-flex; align-items:center; gap:5px; transition:all 0.18s;"
+                                                    onmouseover="this.style.background='rgba(239,68,68,0.2)'"
+                                                    onmouseout="this.style.background='rgba(239,68,68,0.1)'">
+                                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                                                    <polyline points="3 6 5 6 21 6"/>
+                                                    <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+                                                    <path d="M10 11v6M14 11v6"/>
+                                                    <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+                                                </svg>
+                                                Supprimer
+                                            </button>
+                                        </form>
+                                    @endif
+
+                                </div>
+                            </td>
                         </tr>
                     @endforeach
                 </tbody>
             </table>
         </div>
 
-        {{-- Pagination --}}
         @if($submissions->hasPages())
             <div style="margin-top:20px; display:flex; justify-content:center;">
                 {{ $submissions->links() }}
@@ -258,7 +248,6 @@
         @endif
 
     @endif
-
 </div>
 
 @endsection

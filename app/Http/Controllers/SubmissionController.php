@@ -191,39 +191,62 @@ class SubmissionController extends Controller
      */
     public function correctLine(Request $request, Submission $submission, StagingCorrection $correction)
     {
-        // Vérifications de sécurité
         if ($submission->user_id !== auth()->id()) {
             return response()->json(['error' => 'Accès non autorisé.'], 403);
         }
-
+ 
         if ($submission->statut !== 'EN_CORRECTION') {
             return response()->json(['error' => 'Ce dossier ne peut pas être modifié.'], 422);
         }
-
+ 
         if (
             $correction->submission_id !== $submission->id ||
             $correction->version !== $submission->version
         ) {
             return response()->json(['error' => 'Correction invalide.'], 403);
         }
-
-        // Seules les lignes REFUSÉES peuvent être corrigées
+ 
         if ($correction->statut_revision !== 'REFUSE') {
             return response()->json(['error' => 'Cette ligne ne nécessite pas de correction.'], 422);
         }
-
+ 
+        /*
+         * Validation : au moins une colonne doit être renseignée.
+         * Toutes sont facultatives individuellement car l'employé
+         * ne corrige que ce qui est nécessaire.
+         */
         $request->validate([
-            'valeur_corrigee' => ['required', 'string', 'max:500'],
+            'valeur_corrigee'       => ['nullable', 'string', 'max:500'],
+            'table_db2_corrigee'    => ['nullable', 'string', 'max:100'],
+            'cle_primaire_corrigee' => ['nullable', 'string', 'max:100'],
+            'champ_corrige'         => ['nullable', 'string', 'max:100'],
         ]);
-
-        $correction->update([
-            'valeur_corrigee' => trim($request->valeur_corrigee),
-        ]);
-
+ 
+        /*
+         * On ne met à jour que les colonnes qui ont été renseignées.
+         * Si l'employé laisse une colonne vide, on garde l'ancienne valeur.
+         * array_filter(null check) évite d'écraser avec null.
+         */
+        $updates = array_filter([
+            'valeur_corrigee'       => $request->valeur_corrigee       ? trim($request->valeur_corrigee) : null,
+            'table_db2_corrigee'    => $request->table_db2_corrigee    ? strtoupper(trim($request->table_db2_corrigee)) : null,
+            'cle_primaire_corrigee' => $request->cle_primaire_corrigee ? trim($request->cle_primaire_corrigee) : null,
+            'champ_corrige'         => $request->champ_corrige         ? strtoupper(trim($request->champ_corrige)) : null,
+        ], fn($v) => !is_null($v));
+ 
+        if (empty($updates)) {
+            return response()->json(['error' => 'Aucune correction fournie.'], 422);
+        }
+ 
+        $correction->update($updates);
+ 
         return response()->json([
-            'success'        => true,
-            'valeur_corrigee' => $correction->valeur_corrigee,
-            'message'        => 'Correction enregistrée.',
+            'success'               => true,
+            'valeur_corrigee'       => $correction->fresh()->valeur_corrigee,
+            'table_db2_corrigee'    => $correction->fresh()->table_db2_corrigee,
+            'cle_primaire_corrigee' => $correction->fresh()->cle_primaire_corrigee,
+            'champ_corrige'         => $correction->fresh()->champ_corrige,
+            'message'               => 'Corrections enregistrées.',
         ]);
     }
 

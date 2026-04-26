@@ -19,10 +19,14 @@ class StagingCorrection extends Model
         'appliquee',
         'push_statut',
         'push_message',
-        // Nouvelles colonnes de révision ligne par ligne
+        // Colonnes de révision
         'statut_revision',
         'commentaire_sup',
+        // Colonnes corrigées par l'employé (toutes les colonnes modifiables)
         'valeur_corrigee',
+        'table_db2_corrigee',
+        'cle_primaire_corrigee',
+        'champ_corrige',
     ];
 
     protected function casts(): array
@@ -50,44 +54,69 @@ class StagingCorrection extends Model
         return $query->where('push_statut', 'PENDING');
     }
 
-    /**
-     * Scope : lignes refusées par le supérieur (l'employé doit corriger).
-     */
     public function scopeRefused($query)
     {
         return $query->where('statut_revision', 'REFUSE');
     }
 
-    /**
-     * Scope : lignes validées par le supérieur.
-     */
     public function scopeValidated($query)
     {
         return $query->where('statut_revision', 'VALIDE');
     }
 
-    /**
-     * Scope : lignes pas encore révisées.
-     */
     public function scopeNotReviewed($query)
     {
         return $query->where('statut_revision', 'PENDING');
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ── Helpers valeurs effectives ────────────────────────────────────────────
 
     /**
      * Retourne la valeur effective à pousser vers DB2.
-     *
-     * PRIORITÉ : valeur_corrigee (saisie par l'employé après correction)
-     * sur valeur_correction (valeur originale du fichier Excel).
-     *
-     * C'est cette méthode que PushDb2Service doit appeler
-     * pour savoir quelle valeur envoyer à DB2.
+     * Priorité : valeur corrigée par l'employé > valeur originale Excel.
      */
     public function getValeurEffective(): string
     {
         return $this->valeur_corrigee ?? $this->valeur_correction;
+    }
+
+    /**
+     * Retourne la table DB2 effective.
+     * Priorité : table corrigée par l'employé > table originale Excel.
+     */
+    public function getTableDb2Effective(): string
+    {
+        return $this->table_db2_corrigee ?? $this->table_db2;
+    }
+
+    /**
+     * Retourne la clé primaire effective.
+     * Priorité : clé corrigée par l'employé > clé originale Excel.
+     */
+    public function getCleprimaireEffective(): ?string
+    {
+        return $this->cle_primaire_corrigee ?? $this->cle_primaire;
+    }
+
+    /**
+     * Retourne le champ effectif à modifier.
+     * Priorité : champ corrigé par l'employé > champ original Excel.
+     */
+    public function getChampEffective(): string
+    {
+        return $this->champ_corrige ?? $this->champ;
+    }
+
+    /**
+     * Vérifie si au moins une colonne a été corrigée par l'employé.
+     * Utilisé pour savoir si la ligne a été traitée.
+     */
+    public function isCorrectedByEmployee(): bool
+    {
+        return ! is_null($this->valeur_corrigee)
+            || ! is_null($this->table_db2_corrigee)
+            || ! is_null($this->cle_primaire_corrigee)
+            || ! is_null($this->champ_corrige);
     }
 
     /**
@@ -107,24 +136,14 @@ class StagingCorrection extends Model
     }
 
     /**
-     * Vérifie si la ligne a été corrigée par l'employé
-     * (valeur_corrigee renseignée après un refus).
-     */
-    public function isCorrectedByEmployee(): bool
-    {
-        return ! is_null($this->valeur_corrigee);
-    }
-
-    /**
      * Retourne la classe CSS du badge selon statut_revision.
-     * Utilisée dans les vues pour coloriser les lignes.
      */
     public function getRevisionBadgeClass(): string
     {
         return match($this->statut_revision) {
             'VALIDE'  => 'badge-emerald',
             'REFUSE'  => 'badge-red',
-            default   => 'badge-gray',  // PENDING
+            default   => 'badge-gray',
         };
     }
 
