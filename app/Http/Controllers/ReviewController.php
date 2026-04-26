@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AuditLog;
 use App\Models\Review;
 use App\Models\Submission;
+use App\Models\StagingCorrection;
 use App\Notifications\CorrectionRequestedNotification;
 use App\Notifications\SubmissionApprovedNotification;
 use App\Notifications\PushCompletedNotification;
@@ -14,48 +15,43 @@ use Illuminate\Http\Request;
 /**
  * ReviewController
  *
- * Gère toutes les actions de révision côté supérieur :
- *   - Dashboard des dossiers en attente
- *   - Consultation du détail d'un dossier
- *   - Approbation → déclenche le push DB2 immédiatement
- *   - Rejet avec commentaires → notifie l'employé
+ * Gère toutes les actions de révision côté supérieur.
  *
- * Accessible uniquement aux utilisateurs ayant le rôle "superieur".
- * Les admins ont aussi accès à la lecture des dossiers.
+ * NOUVELLES MÉTHODES ajoutées :
+ *   - validateLine() → valide une ligne individuelle
+ *   - refuseLine()   → refuse une ligne avec commentaire
+ *
+ * Le workflow est maintenant :
+ *   1. Le supérieur valide/refuse chaque ligne individuellement
+ *   2. Quand toutes les lignes sont traitées, il clique "Finaliser"
+ *      → approve() si tout est validé
+ *      → reject()  si au moins une ligne est refusée
  */
 class ReviewController extends Controller
 {
-    /**
-     * On injecte PushDb2Service via le constructeur.
-     * Laravel résout automatiquement les dépendances (injection de dépendances).
-     */
     public function __construct(private PushDb2Service $pushService)
     {
     }
 
     /**
      * Dashboard supérieur.
-     * Affiche les dossiers groupés par statut pour une vision rapide.
      */
     public function dashboard()
     {
-        // Dossiers urgents : ceux qui attendent une décision
         $enAttente = Submission::with('user')
             ->whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])
-            ->orderBy('created_at')  // Les plus anciens d'abord
+            ->orderBy('created_at')
             ->paginate(10, ['*'], 'attente_page');
 
-        // Dossiers traités récemment (pour historique)
         $traites = Submission::with('user')
             ->whereIn('statut', ['TERMINE', 'TERMINE_AVEC_ERREURS', 'EN_CORRECTION'])
             ->orderByDesc('updated_at')
             ->limit(10)
             ->get();
 
-        // Statistiques rapides pour le dashboard
         $stats = [
-            'en_attente'           => Submission::whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])->count(),
-            'traites_aujourd_hui'  => Submission::whereIn('statut', ['TERMINE', 'APPROUVE'])
+            'en_attente'          => Submission::whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])->count(),
+            'traites_aujourd_hui' => Submission::whereIn('statut', ['TERMINE', 'APPROUVE'])
                                         ->whereDate('updated_at', today())
                                         ->count(),
         ];
@@ -65,53 +61,153 @@ class ReviewController extends Controller
 
     /**
      * Affiche le détail d'un dossier pour révision.
-     * Marque automatiquement le dossier EN_REVISION si c'était EN_ATTENTE.
+     * Marque automatiquement EN_REVISION si c'était EN_ATTENTE.
      */
     public function show(Submission $submission)
     {
-        // Transition automatique vers EN_REVISION dès qu'un supérieur ouvre le dossier
         if ($submission->statut === 'EN_ATTENTE') {
             $submission->update(['statut' => 'EN_REVISION']);
         }
 
-        // Corrections de la version courante, paginées
         $corrections = $submission->corrections()
             ->where('version', $submission->version)
             ->orderBy('ligne_ref')
             ->paginate(25);
 
-        // Historique complet des révisions
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
-        return view('superior.submissions.show', compact('submission', 'corrections', 'reviews'));
+        /*
+         * Compteurs pour l'interface de révision :
+         * le supérieur sait combien de lignes il lui reste à traiter.
+         */
+        $totalLines    = $submission->corrections()->where('version', $submission->version)->count();
+        $validatedLines = $submission->corrections()->where('version', $submission->version)->where('statut_revision', 'VALIDE')->count();
+        $refusedLines  = $submission->corrections()->where('version', $submission->version)->where('statut_revision', 'REFUSE')->count();
+        $pendingLines  = $totalLines - $validatedLines - $refusedLines;
+
+        return view('superior.submissions.show', compact(
+            'submission', 'corrections', 'reviews',
+            'totalLines', 'validatedLines', 'refusedLines', 'pendingLines'
+        ));
     }
 
     /**
-     * Approuve un dossier et déclenche immédiatement le push vers DB2.
+     * Valide une ligne individuelle de correction.
      *
-     * Flux :
-     * 1. Vérification que le dossier est révisable
-     * 2. Création de l'entrée Review (decision = APPROUVE)
-     * 3. Mise à jour du statut → APPROUVE
-     * 4. Push synchrone vers DB2 via PushDb2Service
-     * 5. Notifications (employé + supérieur)
-     * 6. Audit logs
+     * PATCH /superieur/submissions/{submission}/corrections/{correction}/validate
+     *
+     * Met à jour statut_revision = 'VALIDE' sur la ligne.
+     * Retourne une réponse JSON pour que le JS puisse
+     * mettre à jour l'interface sans recharger la page.
+     */
+    public function validateLine(Request $request, Submission $submission, StagingCorrection $correction)
+    {
+        /*
+         * Vérification que la correction appartient bien à cette soumission
+         * et à la version courante — sécurité contre la manipulation d'URL.
+         */
+        if (
+            $correction->submission_id !== $submission->id ||
+            $correction->version !== $submission->version
+        ) {
+            return response()->json(['error' => 'Correction invalide.'], 403);
+        }
+
+        $correction->update(['statut_revision' => 'VALIDE', 'commentaire_sup' => null]);
+
+        // Audit de la validation de la ligne
+        AuditLog::record('APPROBATION', 'OK', [
+            'submission_id'    => $submission->id,
+            'table_db2'        => $correction->table_db2,
+            'champ_modifie'    => $correction->champ,
+            'valeur_appliquee' => "Ligne #{$correction->ligne_ref} validée",
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => "Ligne #{$correction->ligne_ref} validée.",
+        ]);
+    }
+
+    /**
+     * Refuse une ligne individuelle avec un commentaire obligatoire.
+     *
+     * PATCH /superieur/submissions/{submission}/corrections/{correction}/refuse
+     *
+     * Met à jour :
+     *   statut_revision = 'REFUSE'
+     *   commentaire_sup = commentaire saisi par le supérieur
+     *
+     * Ce commentaire sera visible par l'employé quand il
+     * ouvrira son dossier retourné.
+     */
+    public function refuseLine(Request $request, Submission $submission, StagingCorrection $correction)
+    {
+        if (
+            $correction->submission_id !== $submission->id ||
+            $correction->version !== $submission->version
+        ) {
+            return response()->json(['error' => 'Correction invalide.'], 403);
+        }
+
+        // Le commentaire est obligatoire pour un refus de ligne
+        $request->validate([
+            'commentaire' => ['required', 'string', 'min:5', 'max:1000'],
+        ]);
+
+        $correction->update([
+            'statut_revision' => 'REFUSE',
+            'commentaire_sup' => $request->commentaire,
+            // On remet valeur_corrigee à null si la ligne était déjà
+            // corrigée par l'employé mais refusée à nouveau
+            'valeur_corrigee' => null,
+        ]);
+
+        AuditLog::record('REJET', 'OK', [
+            'submission_id'    => $submission->id,
+            'table_db2'        => $correction->table_db2,
+            'champ_modifie'    => $correction->champ,
+            'valeur_appliquee' => "Ligne #{$correction->ligne_ref} refusée : {$request->commentaire}",
+        ]);
+
+        return response()->json([
+            'success'     => true,
+            'message'     => "Ligne #{$correction->ligne_ref} refusée.",
+            'commentaire' => $request->commentaire,
+        ]);
+    }
+
+    /**
+     * Finalise la révision et approuve le dossier.
+     * Déclenche le push DB2.
+     *
+     * Appelé seulement quand TOUTES les lignes sont validées.
      */
     public function approve(Request $request, Submission $submission)
     {
-        // Vérification : le dossier doit être en révision ou en attente
         if (! in_array($submission->statut, ['EN_ATTENTE', 'EN_REVISION'])) {
+            return back()->withErrors(['error' => 'Ce dossier ne peut plus être approuvé.']);
+        }
+
+        /*
+         * Vérification de sécurité : il ne doit plus rester de lignes
+         * PENDING ou REFUSE avant d'approuver.
+         * Si le supérieur essaie d'approuver avec des lignes non traitées,
+         * on le bloque.
+         */
+        $linesNotValidated = $submission->corrections()
+            ->where('version', $submission->version)
+            ->whereIn('statut_revision', ['PENDING', 'REFUSE'])
+            ->count();
+
+        if ($linesNotValidated > 0) {
             return back()->withErrors([
-                'error' => 'Ce dossier ne peut plus être approuvé dans son état actuel.',
+                'error' => "Impossible d'approuver : {$linesNotValidated} ligne(s) non validée(s). Traitez toutes les lignes avant de finaliser.",
             ]);
         }
 
-        // Commentaire facultatif à l'approbation
-        $request->validate([
-            'commentaire' => ['nullable', 'string', 'max:1000'],
-        ]);
+        $request->validate(['commentaire' => ['nullable', 'string', 'max:1000']]);
 
-        // 2. Enregistrement de la décision de révision
         Review::create([
             'submission_id' => $submission->id,
             'reviewer_id'   => auth()->id(),
@@ -120,115 +216,85 @@ class ReviewController extends Controller
             'created_at'    => now(),
         ]);
 
-        // 3. Mise à jour du statut du dossier
         $submission->update(['statut' => 'APPROUVE']);
 
-        // 4. Audit de l'approbation
-        AuditLog::record('APPROBATION', 'OK', [
-            'submission_id' => $submission->id,
-        ]);
+        AuditLog::record('APPROBATION', 'OK', ['submission_id' => $submission->id]);
 
-        // Notification à l'employé : dossier approuvé, push en cours
         $submission->user->notify(new SubmissionApprovedNotification($submission));
 
-        // 5. Push synchrone vers DB2
+        // Push vers DB2 — PushDb2Service utilisera getValeurEffective()
+        // qui priorise valeur_corrigee sur valeur_correction
         $rapport = $this->pushService->push($submission);
 
-        // 6. Notification de fin de push (à l'employé ET au supérieur)
         $submission->user->notify(new PushCompletedNotification($submission, $rapport));
         auth()->user()->notify(new PushCompletedNotification($submission, $rapport));
 
-        // Message de retour selon le résultat du push
         $message = $rapport['erreurs'] === 0
-            ? "Dossier approuvé et {$rapport['ok']} correction(s) appliquée(s) sur DB2 avec succès."
-            : "Dossier approuvé. {$rapport['ok']} correction(s) OK, {$rapport['erreurs']} erreur(s). Consultez le rapport.";
+            ? "Dossier approuvé et {$rapport['ok']} correction(s) appliquée(s) sur DB2."
+            : "Dossier approuvé. {$rapport['ok']} OK, {$rapport['erreurs']} erreur(s).";
 
         return redirect()->route('superieur.dashboard')
             ->with($rapport['erreurs'] === 0 ? 'success' : 'warning', $message);
     }
 
     /**
-     * Rejette un dossier avec des commentaires pour l'employé.
-     *
-     * Le statut passe à EN_CORRECTION.
-     * L'employé reçoit une notification avec les commentaires.
+     * Rejette le dossier et le renvoie à l'employé pour corrections.
+     * Appelé quand au moins une ligne est refusée.
      */
     public function reject(Request $request, Submission $submission)
     {
-        // Vérification du statut
         if (! in_array($submission->statut, ['EN_ATTENTE', 'EN_REVISION'])) {
-            return back()->withErrors([
-                'error' => 'Ce dossier ne peut pas être rejeté dans son état actuel.',
-            ]);
+            return back()->withErrors(['error' => 'Ce dossier ne peut pas être rejeté.']);
         }
 
-        // Le commentaire est OBLIGATOIRE pour un rejet
-        // (l'employé doit savoir quoi corriger)
         $request->validate([
-            'commentaire' => ['required', 'string', 'min:10', 'max:2000'],
-        ], [
-            'commentaire.required' => 'Un commentaire explicatif est obligatoire pour un rejet.',
-            'commentaire.min'      => 'Le commentaire doit contenir au moins 10 caractères.',
+            'commentaire' => ['nullable', 'string', 'max:2000'],
         ]);
 
-        // Enregistrement de la décision de rejet
+        // Compte les lignes refusées pour le message
+        $refusedCount = $submission->corrections()
+            ->where('version', $submission->version)
+            ->where('statut_revision', 'REFUSE')
+            ->count();
+
         Review::create([
             'submission_id' => $submission->id,
             'reviewer_id'   => auth()->id(),
-            'commentaire'   => $request->commentaire,
+            'commentaire'   => $request->commentaire ?? "{$refusedCount} ligne(s) refusée(s). Consultez les commentaires sur chaque ligne.",
             'decision'      => 'REJET',
             'created_at'    => now(),
         ]);
 
-        // Mise à jour du statut → EN_CORRECTION
         $submission->update(['statut' => 'EN_CORRECTION']);
 
-        // Audit
         AuditLog::record('REJET', 'OK', [
             'submission_id'    => $submission->id,
-            'valeur_appliquee' => "Commentaire : {$request->commentaire}",
+            'valeur_appliquee' => "{$refusedCount} ligne(s) refusée(s)",
         ]);
 
-        // Notification à l'employé avec les commentaires de correction
         $submission->user->notify(
-            new CorrectionRequestedNotification($submission, $request->commentaire)
+            new CorrectionRequestedNotification($submission, $request->commentaire ?? '')
         );
 
         return redirect()->route('superieur.dashboard')
-            ->with('success', 'Dossier rejeté. L\'employé a été notifié des corrections à apporter.');
+            ->with('success', "Dossier retourné à l'employé. {$refusedCount} ligne(s) à corriger.");
     }
 
     /**
-     * Liste tous les dossiers avec filtres avancés.
-     * Accessible aux supérieurs et aux admins.
+     * Liste tous les dossiers avec filtres.
      */
     public function allSubmissions(Request $request)
     {
         $query = Submission::with(['user', 'latestReview.reviewer'])
             ->orderByDesc('created_at');
 
-        // Filtre par statut
-        if ($request->filled('statut')) {
-            $query->where('statut', $request->statut);
-        }
-
-        // Filtre par employé
-        if ($request->filled('user_id')) {
-            $query->where('user_id', $request->user_id);
-        }
-
-        // Filtre par période
-        if ($request->filled('date_debut')) {
-            $query->whereDate('created_at', '>=', $request->date_debut);
-        }
-        if ($request->filled('date_fin')) {
-            $query->whereDate('created_at', '<=', $request->date_fin);
-        }
+        if ($request->filled('statut'))     $query->where('statut', $request->statut);
+        if ($request->filled('user_id'))    $query->where('user_id', $request->user_id);
+        if ($request->filled('date_debut')) $query->whereDate('created_at', '>=', $request->date_debut);
+        if ($request->filled('date_fin'))   $query->whereDate('created_at', '<=', $request->date_fin);
 
         $submissions = $query->paginate(15)->withQueryString();
-
-        // Liste des employés pour le filtre
-        $employes = \App\Models\User::role('employe')->orderBy('name')->get();
+        $employes    = \App\Models\User::role('employe')->orderBy('name')->get();
 
         return view('superior.submissions.index', compact('submissions', 'employes'));
     }
