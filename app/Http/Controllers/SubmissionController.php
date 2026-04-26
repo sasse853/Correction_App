@@ -4,34 +4,27 @@ namespace App\Http\Controllers;
 
 use App\Models\AuditLog;
 use App\Models\Submission;
+use App\Models\StagingCorrection;
 use App\Notifications\NewSubmissionNotification;
 use App\Services\CorrectionsImport;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use Maatwebsite\Excel\Facades\Excel;
-use Spatie\Permission\Models\Role;
 use App\Models\User;
 
 /**
  * SubmissionController
  *
- * Gère tout le cycle de vie des dossiers côté employé :
- *   - Liste de ses propres dossiers
- *   - Upload d'un nouveau fichier Excel
- *   - Consultation du détail d'un dossier
- *   - Re-soumission d'un fichier corrigé (après rejet)
- *
- * Chaque upload crée une nouvelle entrée dans "submissions"
- * et parse les lignes vers "staging_corrections".
- * Toutes les versions sont conservées pour la traçabilité.
+ * NOUVELLES MÉTHODES :
+ *   - destroy()     → supprime un dossier EN_ATTENTE
+ *   - correctLine() → l'employé corrige une ligne refusée
+ *                     directement sur la plateforme
  */
 class SubmissionController extends Controller
 {
     /**
      * Liste les dossiers de l'employé connecté.
-     * Paginée et triée du plus récent au plus ancien.
      */
     public function index()
     {
@@ -43,7 +36,7 @@ class SubmissionController extends Controller
     }
 
     /**
-     * Affiche le formulaire d'upload d'un nouveau fichier Excel.
+     * Formulaire d'upload.
      */
     public function create()
     {
@@ -52,77 +45,46 @@ class SubmissionController extends Controller
 
     /**
      * Traite l'upload et le parsing du fichier Excel.
-     *
-     * Étapes :
-     * 1. Validation du fichier (type MIME, taille, extension)
-     * 2. Stockage sécurisé du fichier original dans Storage
-     * 3. Création du dossier (submission) en base
-     * 4. Parsing ligne par ligne via CorrectionsImport
-     * 5. Notification au(x) supérieur(s)
-     * 6. Enregistrement dans audit_logs
      */
     public function store(Request $request)
     {
-        // 1. Validation du fichier uploadé
         $request->validate([
-            'fichier'      => [
-                'required',
-                'file',
-                // On accepte uniquement les formats Excel
-                'mimes:xlsx,xls,csv',
-                // Taille maximale en KB (20 MB = 20480 KB)
-                'max:20480',
-            ],
-            'description'  => ['nullable', 'string', 'max:500'],
+            'fichier'     => ['required', 'file', 'mimes:xlsx,xls,csv', 'max:20480'],
+            'description' => ['nullable', 'string', 'max:500'],
         ], [
             'fichier.required' => 'Veuillez sélectionner un fichier Excel.',
             'fichier.mimes'    => 'Le fichier doit être au format .xlsx, .xls ou .csv.',
             'fichier.max'      => 'Le fichier ne doit pas dépasser 20 Mo.',
         ]);
 
-        $file = $request->file('fichier');
-
-        // 2. Stockage du fichier original avec un nom unique (UUID)
-        //    pour éviter les conflits et garantir la traçabilité
-        $uuid     = (string) Str::uuid();
+        $file      = $request->file('fichier');
+        $uuid      = (string) Str::uuid();
         $extension = $file->getClientOriginalExtension();
-        $filePath  = $file->storeAs(
-            'submissions',           // Dossier dans storage/app/
-            "{$uuid}.{$extension}",  // Nom unique
-            'local'                  // Disque local (pas public)
-        );
+        $filePath  = $file->storeAs('submissions', "{$uuid}.{$extension}", 'local');
 
-        // 3. Création du dossier en base avec statut initial EN_ATTENTE
         $submission = Submission::create([
-            'user_id'           => auth()->id(),
-            'uuid'              => $uuid,
-            'file_path'         => $filePath,
-            'file_original_name'=> $file->getClientOriginalName(),
-            'version'           => 1,
-            'statut'            => 'EN_ATTENTE',
-            'description'       => $request->description,
+            'user_id'            => auth()->id(),
+            'uuid'               => $uuid,
+            'file_path'          => $filePath,
+            'file_original_name' => $file->getClientOriginalName(),
+            'version'            => 1,
+            'statut'             => 'EN_ATTENTE',
+            'description'        => $request->description,
         ]);
 
-        // 4. Parsing du fichier Excel vers staging_corrections
-        //    On utilise notre classe d'import personnalisée
         try {
-            Excel::import(new CorrectionsImport($submission), $file);
-        } catch (\Maatwebsite\Excel\Validators\ValidationException $e) {
-            // Si le fichier a des erreurs de structure, on supprime
-            // le dossier créé et le fichier stocké pour rester propre
+            (new CorrectionsImport($submission))->import($file);
+        } catch (\Exception $e) {
             Storage::disk('local')->delete($filePath);
             $submission->delete();
-
-            // On retourne les erreurs de validation du fichier
-            $failures = collect($e->failures())->map(fn($f) => $f->errors())->flatten();
-            return back()->withErrors(['fichier' => $failures->toArray()]);
+            return back()->withErrors([
+                'fichier' => 'Le fichier soumis est invalide : ' . $e->getMessage(),
+            ]);
         }
 
-        // 5. Notification à tous les supérieurs de la nouvelle soumission
         $superieurs = User::role('superieur')->where('is_active', true)->get();
         Notification::send($superieurs, new NewSubmissionNotification($submission));
 
-        // 6. Audit log
         AuditLog::record('UPLOAD', 'OK', [
             'submission_id'    => $submission->id,
             'valeur_appliquee' => "Fichier : {$submission->file_original_name}",
@@ -133,91 +95,184 @@ class SubmissionController extends Controller
     }
 
     /**
-     * Affiche le détail d'un dossier.
-     * Un employé ne peut voir que ses propres dossiers.
+     * Affiche le détail d'un dossier (vue employé).
      */
     public function show(Submission $submission)
     {
-        // Sécurité : un employé ne peut consulter que ses propres dossiers
         if ($submission->user_id !== auth()->id()) {
             abort(403, 'Accès non autorisé à ce dossier.');
         }
 
-        // Chargement des corrections de la version courante
         $corrections = $submission->corrections()
             ->where('version', $submission->version)
             ->orderBy('ligne_ref')
             ->paginate(20);
 
-        // Chargement de l'historique des révisions
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
-        return view('employee.submissions.show', compact('submission', 'corrections', 'reviews'));
+        /*
+         * Compteurs pour informer l'employé de l'état de la révision.
+         * Utiles quand le dossier est EN_CORRECTION pour qu'il sache
+         * combien de lignes il doit corriger.
+         */
+        $refusedCount = $submission->corrections()
+            ->where('version', $submission->version)
+            ->where('statut_revision', 'REFUSE')
+            ->count();
+
+        $correctedCount = $submission->corrections()
+            ->where('version', $submission->version)
+            ->where('statut_revision', 'REFUSE')
+            ->whereNotNull('valeur_corrigee')
+            ->count();
+
+        return view('employee.submissions.show', compact(
+            'submission', 'corrections', 'reviews',
+            'refusedCount', 'correctedCount'
+        ));
     }
 
     /**
-     * Re-soumission d'un fichier corrigé.
+     * Supprime un dossier soumis par l'employé.
      *
-     * Disponible uniquement si le statut est EN_CORRECTION.
-     * Crée une nouvelle version du dossier (v1 → v2 → v3 etc.)
-     * Les anciennes versions sont conservées dans staging_corrections.
+     * DELETE /employe/submissions/{submission}
+     *
+     * Conditions :
+     *   - Le dossier doit appartenir à l'employé connecté
+     *   - Le statut doit être EN_ATTENTE uniquement
+     *     (impossible de supprimer un dossier déjà en révision)
+     *
+     * Supprime :
+     *   - Le fichier Excel stocké sur le disque
+     *   - Les corrections parsées dans staging_corrections
+     *   - Le dossier dans submissions
      */
-    public function resubmit(Request $request, Submission $submission)
+    public function destroy(Submission $submission)
     {
-        // Vérification que le dossier appartient à l'employé
         if ($submission->user_id !== auth()->id()) {
             abort(403);
         }
 
-        // Vérification que le dossier est bien en attente de correction
+        if ($submission->statut !== 'EN_ATTENTE') {
+            return back()->withErrors([
+                'error' => 'Impossible de supprimer ce dossier : il est déjà en cours de révision.',
+            ]);
+        }
+
+        // Suppression du fichier Excel physique
+        Storage::disk('local')->delete($submission->file_path);
+
+        // Les corrections liées sont supprimées automatiquement
+        // grâce à la contrainte onDelete('cascade') en migration.
+        // Si ce n'est pas le cas, on les supprime manuellement :
+        $submission->corrections()->delete();
+
+        $submission->delete();
+
+        AuditLog::record('UPLOAD', 'OK', [
+            'submission_id'    => null,
+            'valeur_appliquee' => "Suppression du dossier #{$submission->id} : {$submission->file_original_name}",
+        ]);
+
+        return redirect()->route('employe.submissions.index')
+            ->with('success', "Le dossier \"{$submission->file_original_name}\" a été supprimé.");
+    }
+
+    /**
+     * L'employé corrige une ligne refusée directement sur la plateforme.
+     *
+     * PATCH /employe/submissions/{submission}/corrections/{correction}
+     *
+     * Met à jour valeur_corrigee sur la StagingCorrection.
+     * La ligne reste en statut_revision = REFUSE jusqu'à ce que
+     * le supérieur la revalide au prochain cycle.
+     *
+     * Retourne JSON pour mise à jour dynamique de l'interface.
+     */
+    public function correctLine(Request $request, Submission $submission, StagingCorrection $correction)
+    {
+        // Vérifications de sécurité
+        if ($submission->user_id !== auth()->id()) {
+            return response()->json(['error' => 'Accès non autorisé.'], 403);
+        }
+
         if ($submission->statut !== 'EN_CORRECTION') {
-            return back()->withErrors(['error' => 'Ce dossier ne peut pas être re-soumis dans son état actuel.']);
+            return response()->json(['error' => 'Ce dossier ne peut pas être modifié.'], 422);
         }
 
-        // Validation du nouveau fichier
+        if (
+            $correction->submission_id !== $submission->id ||
+            $correction->version !== $submission->version
+        ) {
+            return response()->json(['error' => 'Correction invalide.'], 403);
+        }
+
+        // Seules les lignes REFUSÉES peuvent être corrigées
+        if ($correction->statut_revision !== 'REFUSE') {
+            return response()->json(['error' => 'Cette ligne ne nécessite pas de correction.'], 422);
+        }
+
         $request->validate([
-            'fichier' => ['required', 'file', 'mimes:xlsx,xls,csv', 'max:20480'],
+            'valeur_corrigee' => ['required', 'string', 'max:500'],
         ]);
 
-        $file      = $request->file('fichier');
-        $newVersion = $submission->version + 1;
-
-        // Stockage du nouveau fichier avec un nouveau nom unique
-        $uuid      = (string) Str::uuid();
-        $extension = $file->getClientOriginalExtension();
-        $filePath  = $file->storeAs('submissions', "{$uuid}.{$extension}", 'local');
-
-        // Mise à jour du dossier existant (nouvelle version, nouveau fichier)
-        $submission->update([
-            'uuid'              => $uuid,
-            'file_path'         => $filePath,
-            'file_original_name'=> $file->getClientOriginalName(),
-            'version'           => $newVersion,
-            'statut'            => 'EN_ATTENTE',
+        $correction->update([
+            'valeur_corrigee' => trim($request->valeur_corrigee),
         ]);
 
-        // Parsing du nouveau fichier (les anciennes corrections sont conservées)
-        try {
-            Excel::import(new CorrectionsImport($submission), $file);
-        } catch (\Maatwebsite\Excel\Validators\ValidationException $e) {
-            // Rollback : on restaure l'ancienne version
-            Storage::disk('local')->delete($filePath);
-            $submission->update(['version' => $newVersion - 1, 'statut' => 'EN_CORRECTION']);
+        return response()->json([
+            'success'        => true,
+            'valeur_corrigee' => $correction->valeur_corrigee,
+            'message'        => 'Correction enregistrée.',
+        ]);
+    }
 
-            return back()->withErrors(['fichier' => 'Le fichier soumis contient des erreurs de structure.']);
+    /**
+     * Re-soumission globale après que toutes les lignes
+     * refusées ont été corrigées par l'employé.
+     *
+     * Vérifie qu'il ne reste plus de lignes REFUSE sans valeur_corrigee
+     * avant de repasser le dossier en EN_ATTENTE.
+     */
+    public function resubmit(Request $request, Submission $submission)
+    {
+        if ($submission->user_id !== auth()->id()) {
+            abort(403);
         }
 
-        // Notification aux supérieurs
+        if ($submission->statut !== 'EN_CORRECTION') {
+            return back()->withErrors(['error' => 'Ce dossier ne peut pas être re-soumis.']);
+        }
+
+        /*
+         * Vérification : toutes les lignes refusées doivent avoir
+         * une valeur_corrigee avant de re-soumettre.
+         */
+        $uncorrectedLines = $submission->corrections()
+            ->where('version', $submission->version)
+            ->where('statut_revision', 'REFUSE')
+            ->whereNull('valeur_corrigee')
+            ->count();
+
+        if ($uncorrectedLines > 0) {
+            return back()->withErrors([
+                'error' => "Impossible de re-soumettre : {$uncorrectedLines} ligne(s) refusée(s) n'ont pas encore été corrigées.",
+            ]);
+        }
+
+        // Repasse le dossier en EN_ATTENTE pour que le supérieur
+        // puisse revoir les lignes corrigées
+        $submission->update(['statut' => 'EN_ATTENTE']);
+
         $superieurs = User::role('superieur')->where('is_active', true)->get();
         Notification::send($superieurs, new NewSubmissionNotification($submission));
 
-        // Audit
         AuditLog::record('CORRECTION', 'OK', [
             'submission_id'    => $submission->id,
-            'valeur_appliquee' => "Re-soumission v{$newVersion} : {$submission->file_original_name}",
+            'valeur_appliquee' => "Re-soumission v{$submission->version} après corrections en ligne",
         ]);
 
         return redirect()->route('employe.submissions.show', $submission)
-            ->with('success', "Votre correction (version {$newVersion}) a été soumise avec succès.");
+            ->with('success', 'Vos corrections ont été soumises. Le supérieur a été notifié.');
     }
 }

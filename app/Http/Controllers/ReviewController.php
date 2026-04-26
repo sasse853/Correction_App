@@ -5,57 +5,51 @@ namespace App\Http\Controllers;
 use App\Models\AuditLog;
 use App\Models\Review;
 use App\Models\Submission;
+use App\Models\StagingCorrection;
 use App\Notifications\CorrectionRequestedNotification;
 use App\Notifications\SubmissionApprovedNotification;
 use App\Notifications\PushCompletedNotification;
 use App\Services\PushDb2Service;
 use Illuminate\Http\Request;
+use Rap2hpoutre\FastExcel\FastExcel;
 
 /**
- * ReviewController
+ * ReviewController — branche collègue
  *
- * Gère toutes les actions de révision côté supérieur :
- *   - Dashboard des dossiers en attente
- *   - Consultation du détail d'un dossier
- *   - Approbation → déclenche le push DB2 immédiatement
- *   - Rejet avec commentaires → notifie l'employé
+ * CORRECTION fast-excel :
+ * Remplacement de PhpOffice\PhpSpreadsheet\IOFactory::load()
+ * par rap2hpoutre/fast-excel pour la lecture du fichier Excel
+ * dans la méthode show().
  *
- * Accessible uniquement aux utilisateurs ayant le rôle "superieur".
- * Les admins ont aussi accès à la lecture des dossiers.
+ * La logique reste identique : on lit toutes les lignes du fichier
+ * pour les passer à la vue sous forme de tableau associatif
+ * ($excelData et $excelColumns).
  */
 class ReviewController extends Controller
 {
-    /**
-     * On injecte PushDb2Service via le constructeur.
-     * Laravel résout automatiquement les dépendances (injection de dépendances).
-     */
     public function __construct(private PushDb2Service $pushService)
     {
     }
 
     /**
      * Dashboard supérieur.
-     * Affiche les dossiers groupés par statut pour une vision rapide.
      */
     public function dashboard()
     {
-        // Dossiers urgents : ceux qui attendent une décision
         $enAttente = Submission::with('user')
             ->whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])
-            ->orderBy('created_at')  // Les plus anciens d'abord
+            ->orderBy('created_at')
             ->paginate(10, ['*'], 'attente_page');
 
-        // Dossiers traités récemment (pour historique)
         $traites = Submission::with('user')
             ->whereIn('statut', ['TERMINE', 'TERMINE_AVEC_ERREURS', 'EN_CORRECTION'])
             ->orderByDesc('updated_at')
             ->limit(10)
             ->get();
 
-        // Statistiques rapides pour le dashboard
         $stats = [
-            'en_attente'           => Submission::whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])->count(),
-            'traites_aujourd_hui'  => Submission::whereIn('statut', ['TERMINE', 'APPROUVE'])
+            'en_attente'          => Submission::whereIn('statut', ['EN_ATTENTE', 'EN_REVISION'])->count(),
+            'traites_aujourd_hui' => Submission::whereIn('statut', ['TERMINE', 'APPROUVE'])
                                         ->whereDate('updated_at', today())
                                         ->count(),
         ];
@@ -65,107 +59,92 @@ class ReviewController extends Controller
 
     /**
      * Affiche le détail d'un dossier pour révision.
-     * Marque automatiquement le dossier EN_REVISION si c'était EN_ATTENTE.
+     *
+     * CORRECTION fast-excel :
+     * On remplace IOFactory::load() par FastExcel->import()
+     * pour lire le fichier Excel et construire $excelData/$excelColumns.
+     *
+     * FastExcel retourne directement une collection de tableaux
+     * associatifs dont les clés = en-têtes de la première ligne.
+     * C'est plus simple que PhpSpreadsheet qui nécessitait de
+     * parser manuellement les lignes et les colonnes.
      */
     public function show(Submission $submission)
     {
-        // Transition automatique vers EN_REVISION dès qu'un supérieur ouvre le dossier
         if ($submission->statut === 'EN_ATTENTE') {
             $submission->update(['statut' => 'EN_REVISION']);
         }
 
-        // Corrections de la version courante, paginées
         $corrections = $submission->corrections()
             ->where('version', $submission->version)
             ->orderBy('ligne_ref')
             ->paginate(25);
 
-        // Historique complet des révisions
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
         // Lecture du fichier Excel pour afficher les données brutes
-        $excelData = [];
-        $excelColumns = [];
-        
-        
-            try {
-        $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
-
-        if (file_exists($cheminAbsolu)) {
-            // Lire toutes les lignes sans traitement
-            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($cheminAbsolu);
-            $feuille     = $spreadsheet->getActiveSheet();
-            $toutesLignes = $feuille->toArray(null, true, true, false);
-
-            // Trouver la ligne d'en-têtes — c'est la première ligne non vide
-            // qui contient plusieurs colonnes (pas un titre sur une seule cellule)
-            $indexEntetes = null;
-            foreach ($toutesLignes as $i => $ligne) {
-                $colonnesRemplies = count(array_filter($ligne, fn($v) => !is_null($v) && $v !== ''));
-                if ($colonnesRemplies >= 3) {
-                    $indexEntetes = $i;
-                    break;
-                }
-            }
-
-            if ($indexEntetes !== null) {
-                // Les en-têtes
-                $excelColumns = array_values(array_filter(
-                    $toutesLignes[$indexEntetes],
-                    fn($v) => !is_null($v) && $v !== ''
-                ));
-
-                // Les données — tout ce qui suit les en-têtes
-                $lignesDonnees = array_slice($toutesLignes, $indexEntetes + 1);
-
-                // Construire un tableau associatif pour chaque ligne
-                foreach ($lignesDonnees as $ligne) {
-                    $valeurs = array_values($ligne);
-                    // Ignorer les lignes complètement vides
-                    if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
-                        continue;
-                    }
-                    $excelData[] = array_combine(
-                        $excelColumns,
-                        array_slice($valeurs, 0, count($excelColumns))
-                    );
-                }
-            }
-        }
-    } catch (\Exception $e) {
         $excelData    = [];
         $excelColumns = [];
-    }
 
-        return view('superior.submissions.show', compact('submission', 'corrections', 'reviews', 'excelData', 'excelColumns'));
+        try {
+            $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
+
+            if (file_exists($cheminAbsolu)) {
+                /*
+                 * AVANT (PhpSpreadsheet) :
+                 *   $spreadsheet  = IOFactory::load($cheminAbsolu);
+                 *   $feuille      = $spreadsheet->getActiveSheet();
+                 *   $toutesLignes = $feuille->toArray(...);
+                 *   // puis parsing manuel des en-têtes...
+                 *
+                 * APRÈS (FastExcel) :
+                 *   FastExcel::import() lit le fichier et retourne
+                 *   une Collection de tableaux associatifs.
+                 *   Les clés = première ligne du fichier (en-têtes).
+                 *   Beaucoup plus simple, pas besoin de chercher
+                 *   manuellement la ligne d'en-têtes.
+                 */
+                $collection = (new FastExcel)->import($cheminAbsolu);
+
+                if ($collection->isNotEmpty()) {
+                    // Les colonnes = clés du premier élément de la collection
+                    $excelColumns = array_keys($collection->first());
+
+                    // Les données = toute la collection convertie en tableau PHP
+                    $excelData = $collection->toArray();
+                }
+            }
+        } catch (\Exception $e) {
+            /*
+             * En cas d'erreur de lecture (fichier corrompu, format
+             * non supporté...), on initialise des tableaux vides
+             * pour ne pas faire planter la vue.
+             */
+            $excelData    = [];
+            $excelColumns = [];
+        }
+
+        return view('superior.submissions.show', compact(
+            'submission', 'corrections', 'reviews',
+            'excelData', 'excelColumns'
+        ));
     }
 
     /**
-     * Approuve un dossier et déclenche immédiatement le push vers DB2.
-     *
-     * Flux :
-     * 1. Vérification que le dossier est révisable
-     * 2. Création de l'entrée Review (decision = APPROUVE)
-     * 3. Mise à jour du statut → APPROUVE
-     * 4. Push synchrone vers DB2 via PushDb2Service
-     * 5. Notifications (employé + supérieur)
-     * 6. Audit logs
+     * Approuve un dossier et déclenche le push vers DB2.
      */
     public function approve(Request $request, Submission $submission)
     {
-        // Vérification : le dossier doit être en révision ou en attente
         if (! in_array($submission->statut, ['EN_ATTENTE', 'EN_REVISION'])) {
             return back()->withErrors([
                 'error' => 'Ce dossier ne peut plus être approuvé dans son état actuel.',
             ]);
         }
 
-        // Commentaire facultatif à l'approbation
         $request->validate([
             'commentaire' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        // 2. Enregistrement de la décision de révision
         Review::create([
             'submission_id' => $submission->id,
             'reviewer_id'   => auth()->id(),
@@ -174,50 +153,38 @@ class ReviewController extends Controller
             'created_at'    => now(),
         ]);
 
-        // 3. Mise à jour du statut du dossier
         $submission->update(['statut' => 'APPROUVE']);
 
-        // 4. Audit de l'approbation
         AuditLog::record('APPROBATION', 'OK', [
             'submission_id' => $submission->id,
         ]);
 
-        // Notification à l'employé : dossier approuvé, push en cours
         $submission->user->notify(new SubmissionApprovedNotification($submission));
 
-        // 5. Push synchrone vers DB2
         $rapport = $this->pushService->push($submission);
 
-        // 6. Notification de fin de push (à l'employé ET au supérieur)
         $submission->user->notify(new PushCompletedNotification($submission, $rapport));
         auth()->user()->notify(new PushCompletedNotification($submission, $rapport));
 
-        // Message de retour selon le résultat du push
         $message = $rapport['erreurs'] === 0
             ? "Dossier approuvé et {$rapport['ok']} correction(s) appliquée(s) sur DB2 avec succès."
-            : "Dossier approuvé. {$rapport['ok']} correction(s) OK, {$rapport['erreurs']} erreur(s). Consultez le rapport.";
+            : "Dossier approuvé. {$rapport['ok']} OK, {$rapport['erreurs']} erreur(s). Consultez le rapport.";
 
         return redirect()->route('superieur.dashboard')
             ->with($rapport['erreurs'] === 0 ? 'success' : 'warning', $message);
     }
 
     /**
-     * Rejette un dossier avec des commentaires pour l'employé.
-     *
-     * Le statut passe à EN_CORRECTION.
-     * L'employé reçoit une notification avec les commentaires.
+     * Rejette un dossier avec commentaires.
      */
     public function reject(Request $request, Submission $submission)
     {
-        // Vérification du statut
         if (! in_array($submission->statut, ['EN_ATTENTE', 'EN_REVISION'])) {
             return back()->withErrors([
                 'error' => 'Ce dossier ne peut pas être rejeté dans son état actuel.',
             ]);
         }
 
-        // Le commentaire est OBLIGATOIRE pour un rejet
-        // (l'employé doit savoir quoi corriger)
         $request->validate([
             'commentaire' => ['required', 'string', 'min:10', 'max:2000'],
         ], [
@@ -225,7 +192,6 @@ class ReviewController extends Controller
             'commentaire.min'      => 'Le commentaire doit contenir au moins 10 caractères.',
         ]);
 
-        // Enregistrement de la décision de rejet
         Review::create([
             'submission_id' => $submission->id,
             'reviewer_id'   => auth()->id(),
@@ -234,16 +200,13 @@ class ReviewController extends Controller
             'created_at'    => now(),
         ]);
 
-        // Mise à jour du statut → EN_CORRECTION
         $submission->update(['statut' => 'EN_CORRECTION']);
 
-        // Audit
         AuditLog::record('REJET', 'OK', [
             'submission_id'    => $submission->id,
             'valeur_appliquee' => "Commentaire : {$request->commentaire}",
         ]);
 
-        // Notification à l'employé avec les commentaires de correction
         $submission->user->notify(
             new CorrectionRequestedNotification($submission, $request->commentaire)
         );
@@ -253,48 +216,21 @@ class ReviewController extends Controller
     }
 
     /**
-     * Liste tous les dossiers avec filtres avancés.
-     * Accessible aux supérieurs et aux admins.
+     * Liste tous les dossiers avec filtres.
      */
     public function allSubmissions(Request $request)
     {
         $query = Submission::with(['user', 'latestReview.reviewer'])
             ->orderByDesc('created_at');
 
-        // Filtre par statut
-        if ($request->filled('statut')) {
-            $query->where('statut', $request->statut);
-        }
-
-        // Filtre par employé
-        if ($request->filled('user_id')) {
-            $query->where('user_id', $request->user_id);
-        }
-
-        // Filtre par période
-        if ($request->filled('date_debut')) {
-            $query->whereDate('created_at', '>=', $request->date_debut);
-        }
-        if ($request->filled('date_fin')) {
-            $query->whereDate('created_at', '<=', $request->date_fin);
-        }
+        if ($request->filled('statut'))     $query->where('statut', $request->statut);
+        if ($request->filled('user_id'))    $query->where('user_id', $request->user_id);
+        if ($request->filled('date_debut')) $query->whereDate('created_at', '>=', $request->date_debut);
+        if ($request->filled('date_fin'))   $query->whereDate('created_at', '<=', $request->date_fin);
 
         $submissions = $query->paginate(15)->withQueryString();
-
-        // Liste des employés pour le filtre
-        $employes = \App\Models\User::role('employe')->orderBy('name')->get();
+        $employes    = \App\Models\User::role('employe')->orderBy('name')->get();
 
         return view('superior.submissions.index', compact('submissions', 'employes'));
     }
-
-    public function download(Submission $submission)
-{
-    $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
-
-    if (! file_exists($cheminAbsolu)) {
-        return back()->with('erreur', 'Fichier introuvable.');
-    }
-
-    return response()->download($cheminAbsolu, $submission->file_original_name);
-}
 }
