@@ -4,26 +4,22 @@ namespace App\Services;
 
 use App\Models\StagingCorrection;
 use App\Models\Submission;
-use Rap2hpoutre\FastExcel\FastExcel;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
 /**
  * CorrectionsImport
  *
- * Parse le fichier Excel et insère les lignes dans staging_corrections.
+ * CORRECTION : Synchronisation avec l'affichage PhpSpreadsheet.
  *
- * MODE TEST : accepte n'importe quels en-têtes.
- * Le service prend les colonnes dans l'ordre où elles apparaissent
- * dans le fichier et les mappe ainsi :
- *   - Colonne 1 → table_db2
- *   - Colonne 2 → cle_primaire
- *   - Colonne 3 → champ
- *   - Colonne 4 → valeur_correction
- *   - Colonnes supplémentaires → ignorées
+ * On utilise exactement la même logique que dans
+ * SubmissionController@show et ReviewController@show pour lire
+ * le fichier — détection automatique de la ligne d'en-têtes
+ * et exclusion des lignes vides.
  *
- * Si le fichier a moins de 4 colonnes, les colonnes manquantes
- * sont remplies avec des valeurs par défaut pour ne pas bloquer.
- *
- * En production, remplacer ce mapping par les vrais noms de colonnes.
+ * Ainsi staging_corrections contient exactement les mêmes
+ * lignes que ce qui est affiché dans les vues, avec les mêmes
+ * numéros de ligne (ligne_ref), garantissant la synchronisation
+ * entre l'affichage et les données en base.
  */
 class CorrectionsImport
 {
@@ -31,64 +27,88 @@ class CorrectionsImport
     {
     }
 
-    /**
-     * Lance l'import du fichier Excel.
-     *
-     * @param  mixed  $file  Chemin ou UploadedFile
-     * @return int           Nombre de lignes importées
-     */
     public function import($file): int
     {
         $count = 0;
 
-        (new FastExcel)->import($file, function (array $row) use (&$count) {
+        $chemin = is_string($file) ? $file : $file->getRealPath();
+
+        $spreadsheet  = IOFactory::load($chemin);
+        $feuille      = $spreadsheet->getActiveSheet();
+        $toutesLignes = $feuille->toArray(null, true, true, false);
+
+        /*
+         * Détection automatique de la ligne d'en-têtes —
+         * identique à SubmissionController et ReviewController.
+         * C'est la première ligne avec au moins 3 colonnes remplies.
+         */
+        $indexEntetes = null;
+        foreach ($toutesLignes as $i => $ligne) {
+            $colonnesRemplies = count(array_filter(
+                $ligne,
+                fn($v) => !is_null($v) && trim((string)$v) !== ''
+            ));
+            if ($colonnesRemplies >= 3) {
+                $indexEntetes = $i;
+                break;
+            }
+        }
+
+        if ($indexEntetes === null) {
+            return 0;
+        }
+
+        /*
+         * On récupère les en-têtes pour avoir le nombre de colonnes.
+         */
+        $rawEntetes = $toutesLignes[$indexEntetes];
+        $nbColonnes = count(array_filter(
+            $rawEntetes,
+            fn($v) => !is_null($v) && trim((string)$v) !== ''
+        ));
+
+        /*
+         * On parcourt les lignes de données à partir de la ligne
+         * qui suit les en-têtes.
+         *
+         * ligne_ref = numéro de ligne dans le fichier Excel.
+         * On commence à indexEntetes + 2 car :
+         *   - indexEntetes     = index 0-based de la ligne d'en-têtes
+         *   - indexEntetes + 1 = première ligne de données (0-based)
+         *   - indexEntetes + 2 = numéro Excel réel (1-based + 1 pour en-têtes)
+         */
+        $lignesDonnees = array_slice($toutesLignes, $indexEntetes + 1);
+
+        foreach ($lignesDonnees as $i => $ligne) {
+            $valeurs = array_values($ligne);
 
             /*
-             * On récupère les valeurs du tableau dans l'ordre
-             * sans se soucier des noms des clés (en-têtes).
-             * array_values() supprime les clés et reindexe à partir de 0.
-             *
-             * Exemple :
-             *   ['ID' => 1, 'Date' => '...', 'Agent' => '...', 'Action' => '...']
-             *   devient [1, '...', '...', '...']
-             *
-             * On peut ainsi prendre position 0, 1, 2, 3 quelle que soit
-             * la dénomination des colonnes.
+             * On ignore les lignes complètement vides.
+             * C'est exactement la même condition que dans les vues
+             * d'affichage — garantit la synchronisation parfaite
+             * entre staging_corrections et ce qui est affiché.
              */
-            $valeurs = array_values($row);
-
-            /*
-             * Ignore les lignes complètement vides.
-             * array_filter supprime les valeurs null/vides,
-             * si le résultat est vide c'est une ligne blanche.
-             */
-            if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
-                return null;
+            if (empty(array_filter($valeurs, fn($v) => !is_null($v) && trim((string)$v) !== ''))) {
+                continue;
             }
 
             /*
-             * Mapping positionnel :
-             *   Position 0 → table_db2       (obligatoire)
-             *   Position 1 → cle_primaire     (facultatif)
-             *   Position 2 → champ            (obligatoire)
-             *   Position 3 → valeur_correction (obligatoire)
-             *
-             * On utilise ?? pour fournir des valeurs par défaut
-             * si la colonne n'existe pas dans le fichier.
+             * ligne_ref = numéro de ligne réel dans Excel.
+             * indexEntetes + 2 = première ligne de données en Excel
+             * (indexEntetes est 0-based, +1 pour 1-based, +1 pour sauter les en-têtes)
              */
-            $table_db2         = isset($valeurs[0]) ? (string) $valeurs[0] : 'INCONNU';
-            $cle_primaire      = isset($valeurs[1]) ? (string) $valeurs[1] : null;
-            $champ             = isset($valeurs[2]) ? (string) $valeurs[2] : 'CHAMP_' . ($count + 1);
-            $valeur_correction = isset($valeurs[3]) ? (string) $valeurs[3] : '';
+            $ligneRef = $indexEntetes + 2 + $i;
 
             StagingCorrection::create([
                 'submission_id'     => $this->submission->id,
                 'version'           => $this->submission->version,
-                'ligne_ref'         => $count + 2, // +2 car ligne 1 = en-têtes
-                'table_db2'         => strtoupper(trim($table_db2)),
-                'champ'             => strtoupper(trim($champ)),
-                'valeur_correction' => trim($valeur_correction),
-                'cle_primaire'      => $cle_primaire ? trim($cle_primaire) : null,
+                'ligne_ref'         => $ligneRef,
+                'table_db2'         => strtoupper(trim((string)($valeurs[0] ?? 'INCONNU'))),
+                'champ'             => strtoupper(trim((string)($valeurs[2] ?? 'CHAMP_' . $count))),
+                'valeur_correction' => trim((string)($valeurs[3] ?? '')),
+                'cle_primaire'      => isset($valeurs[1]) && trim((string)$valeurs[1]) !== ''
+                                        ? trim((string)$valeurs[1])
+                                        : null,
                 'appliquee'         => false,
                 'push_statut'       => 'PENDING',
                 'statut_revision'   => 'PENDING',
@@ -96,9 +116,7 @@ class CorrectionsImport
             ]);
 
             $count++;
-
-            return null;
-        });
+        }
 
         return $count;
     }

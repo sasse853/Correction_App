@@ -11,21 +11,15 @@ use App\Notifications\SubmissionApprovedNotification;
 use App\Notifications\PushCompletedNotification;
 use App\Services\PushDb2Service;
 use Illuminate\Http\Request;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
 /**
  * ReviewController
  *
- * Gère toutes les actions de révision côté supérieur.
- *
- * NOUVELLES MÉTHODES ajoutées :
- *   - validateLine() → valide une ligne individuelle
- *   - refuseLine()   → refuse une ligne avec commentaire
- *
- * Le workflow est maintenant :
- *   1. Le supérieur valide/refuse chaque ligne individuellement
- *   2. Quand toutes les lignes sont traitées, il clique "Finaliser"
- *      → approve() si tout est validé
- *      → reject()  si au moins une ligne est refusée
+ * MISE À JOUR de show() :
+ * Utilise PhpSpreadsheet pour lire le fichier Excel brut
+ * et l'afficher tel quel dans la vue du supérieur,
+ * avec toutes ses colonnes originales.
  */
 class ReviewController extends Controller
 {
@@ -61,7 +55,15 @@ class ReviewController extends Controller
 
     /**
      * Affiche le détail d'un dossier pour révision.
-     * Marque automatiquement EN_REVISION si c'était EN_ATTENTE.
+     *
+     * MISE À JOUR : Lecture du fichier Excel brut avec PhpSpreadsheet
+     * pour afficher le tableau exact avec toutes ses colonnes originales.
+     *
+     * Variables supplémentaires passées à la vue :
+     *   - $excelColumns      → array des noms de colonnes
+     *   - $excelData         → array des lignes de données
+     *   - $fileExists        → bool
+     *   - $correctionsByLine → Collection indexée par ligne_ref
      */
     public function show(Submission $submission)
     {
@@ -72,40 +74,102 @@ class ReviewController extends Controller
         $corrections = $submission->corrections()
             ->where('version', $submission->version)
             ->orderBy('ligne_ref')
-            ->paginate(25);
+            ->get();
 
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
-        /*
-         * Compteurs pour l'interface de révision :
-         * le supérieur sait combien de lignes il lui reste à traiter.
-         */
-        $totalLines    = $submission->corrections()->where('version', $submission->version)->count();
+        $totalLines     = $submission->corrections()->where('version', $submission->version)->count();
         $validatedLines = $submission->corrections()->where('version', $submission->version)->where('statut_revision', 'VALIDE')->count();
-        $refusedLines  = $submission->corrections()->where('version', $submission->version)->where('statut_revision', 'REFUSE')->count();
-        $pendingLines  = $totalLines - $validatedLines - $refusedLines;
+        $refusedLines   = $submission->corrections()->where('version', $submission->version)->where('statut_revision', 'REFUSE')->count();
+        $pendingLines   = $totalLines - $validatedLines - $refusedLines;
+
+        /*
+         * Lecture du fichier Excel brut avec PhpSpreadsheet.
+         * Même logique que dans SubmissionController@show :
+         * détection automatique de la ligne d'en-têtes.
+         */
+        $excelData    = [];
+        $excelColumns = [];
+        $fileExists   = false;
+
+        try {
+            $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
+
+            if (! file_exists($cheminAbsolu)) {
+                $cheminAbsolu = storage_path('app/' . $submission->file_path);
+            }
+
+            if (file_exists($cheminAbsolu)) {
+                $fileExists   = true;
+                $spreadsheet  = IOFactory::load($cheminAbsolu);
+                $feuille      = $spreadsheet->getActiveSheet();
+                $toutesLignes = $feuille->toArray(null, true, true, false);
+
+                /*
+                 * Détection automatique de la ligne d'en-têtes :
+                 * première ligne avec au moins 3 colonnes non vides.
+                 */
+                $indexEntetes = null;
+                foreach ($toutesLignes as $i => $ligne) {
+                    $colonnesRemplies = count(array_filter(
+                        $ligne,
+                        fn($v) => !is_null($v) && $v !== ''
+                    ));
+                    if ($colonnesRemplies >= 3) {
+                        $indexEntetes = $i;
+                        break;
+                    }
+                }
+                $firstDataLine = ($indexEntetes !== null) ? $indexEntetes + 2 : 2;
+
+                if ($indexEntetes !== null) {
+                    $rawEntetes   = $toutesLignes[$indexEntetes];
+                    $excelColumns = array_values(array_filter(
+                        $rawEntetes,
+                        fn($v) => !is_null($v) && $v !== ''
+                    ));
+                    $nbColonnes   = count($excelColumns);
+
+                    $lignesDonnees = array_slice($toutesLignes, $indexEntetes + 1);
+
+                    foreach ($lignesDonnees as $ligne) {
+                        $valeurs = array_values($ligne);
+
+                        if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
+                            continue;
+                        }
+
+                        $excelData[] = array_combine(
+                            $excelColumns,
+                            array_slice(
+                                array_pad($valeurs, $nbColonnes, ''),
+                                0,
+                                $nbColonnes
+                            )
+                        );
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            $excelData    = [];
+            $excelColumns = [];
+        }
+
+        // Indexation des corrections par ligne_ref pour la vue
+        $correctionsByLine = $corrections->keyBy('ligne_ref');
 
         return view('superior.submissions.show', compact(
             'submission', 'corrections', 'reviews',
-            'totalLines', 'validatedLines', 'refusedLines', 'pendingLines'
+            'totalLines', 'validatedLines', 'refusedLines', 'pendingLines',
+            'excelData', 'excelColumns', 'fileExists', 'correctionsByLine', 'firstDataLine'
         ));
     }
 
     /**
-     * Valide une ligne individuelle de correction.
-     *
-     * PATCH /superieur/submissions/{submission}/corrections/{correction}/validate
-     *
-     * Met à jour statut_revision = 'VALIDE' sur la ligne.
-     * Retourne une réponse JSON pour que le JS puisse
-     * mettre à jour l'interface sans recharger la page.
+     * Valide une ligne individuelle.
      */
     public function validateLine(Request $request, Submission $submission, StagingCorrection $correction)
     {
-        /*
-         * Vérification que la correction appartient bien à cette soumission
-         * et à la version courante — sécurité contre la manipulation d'URL.
-         */
         if (
             $correction->submission_id !== $submission->id ||
             $correction->version !== $submission->version
@@ -115,7 +179,6 @@ class ReviewController extends Controller
 
         $correction->update(['statut_revision' => 'VALIDE', 'commentaire_sup' => null]);
 
-        // Audit de la validation de la ligne
         AuditLog::record('APPROBATION', 'OK', [
             'submission_id'    => $submission->id,
             'table_db2'        => $correction->table_db2,
@@ -130,16 +193,7 @@ class ReviewController extends Controller
     }
 
     /**
-     * Refuse une ligne individuelle avec un commentaire obligatoire.
-     *
-     * PATCH /superieur/submissions/{submission}/corrections/{correction}/refuse
-     *
-     * Met à jour :
-     *   statut_revision = 'REFUSE'
-     *   commentaire_sup = commentaire saisi par le supérieur
-     *
-     * Ce commentaire sera visible par l'employé quand il
-     * ouvrira son dossier retourné.
+     * Refuse une ligne avec commentaire obligatoire.
      */
     public function refuseLine(Request $request, Submission $submission, StagingCorrection $correction)
     {
@@ -150,7 +204,6 @@ class ReviewController extends Controller
             return response()->json(['error' => 'Correction invalide.'], 403);
         }
 
-        // Le commentaire est obligatoire pour un refus de ligne
         $request->validate([
             'commentaire' => ['required', 'string', 'min:5', 'max:1000'],
         ]);
@@ -158,8 +211,6 @@ class ReviewController extends Controller
         $correction->update([
             'statut_revision' => 'REFUSE',
             'commentaire_sup' => $request->commentaire,
-            // On remet valeur_corrigee à null si la ligne était déjà
-            // corrigée par l'employé mais refusée à nouveau
             'valeur_corrigee' => null,
         ]);
 
@@ -178,10 +229,32 @@ class ReviewController extends Controller
     }
 
     /**
-     * Finalise la révision et approuve le dossier.
-     * Déclenche le push DB2.
-     *
-     * Appelé seulement quand TOUTES les lignes sont validées.
+     * Réinitialise une ligne à PENDING.
+     */
+    public function resetLine(Request $request, Submission $submission, StagingCorrection $correction)
+    {
+        if (
+            $correction->submission_id !== $submission->id ||
+            $correction->version !== $submission->version
+        ) {
+            return response()->json(['error' => 'Correction invalide.'], 403);
+        }
+
+        $ancienStatut = $correction->statut_revision;
+
+        $correction->update([
+            'statut_revision' => 'PENDING',
+            'commentaire_sup' => null,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'was'     => $ancienStatut,
+        ]);
+    }
+
+    /**
+     * Approuve le dossier et déclenche le push DB2.
      */
     public function approve(Request $request, Submission $submission)
     {
@@ -189,12 +262,6 @@ class ReviewController extends Controller
             return back()->withErrors(['error' => 'Ce dossier ne peut plus être approuvé.']);
         }
 
-        /*
-         * Vérification de sécurité : il ne doit plus rester de lignes
-         * PENDING ou REFUSE avant d'approuver.
-         * Si le supérieur essaie d'approuver avec des lignes non traitées,
-         * on le bloque.
-         */
         $linesNotValidated = $submission->corrections()
             ->where('version', $submission->version)
             ->whereIn('statut_revision', ['PENDING', 'REFUSE'])
@@ -202,7 +269,7 @@ class ReviewController extends Controller
 
         if ($linesNotValidated > 0) {
             return back()->withErrors([
-                'error' => "Impossible d'approuver : {$linesNotValidated} ligne(s) non validée(s). Traitez toutes les lignes avant de finaliser.",
+                'error' => "Impossible d'approuver : {$linesNotValidated} ligne(s) non validée(s).",
             ]);
         }
 
@@ -217,13 +284,9 @@ class ReviewController extends Controller
         ]);
 
         $submission->update(['statut' => 'APPROUVE']);
-
         AuditLog::record('APPROBATION', 'OK', ['submission_id' => $submission->id]);
-
         $submission->user->notify(new SubmissionApprovedNotification($submission));
 
-        // Push vers DB2 — PushDb2Service utilisera getValeurEffective()
-        // qui priorise valeur_corrigee sur valeur_correction
         $rapport = $this->pushService->push($submission);
 
         $submission->user->notify(new PushCompletedNotification($submission, $rapport));
@@ -238,8 +301,7 @@ class ReviewController extends Controller
     }
 
     /**
-     * Rejette le dossier et le renvoie à l'employé pour corrections.
-     * Appelé quand au moins une ligne est refusée.
+     * Rejette le dossier et le renvoie à l'employé.
      */
     public function reject(Request $request, Submission $submission)
     {
@@ -247,11 +309,8 @@ class ReviewController extends Controller
             return back()->withErrors(['error' => 'Ce dossier ne peut pas être rejeté.']);
         }
 
-        $request->validate([
-            'commentaire' => ['nullable', 'string', 'max:2000'],
-        ]);
+        $request->validate(['commentaire' => ['nullable', 'string', 'max:2000']]);
 
-        // Compte les lignes refusées pour le message
         $refusedCount = $submission->corrections()
             ->where('version', $submission->version)
             ->where('statut_revision', 'REFUSE')
@@ -260,7 +319,7 @@ class ReviewController extends Controller
         Review::create([
             'submission_id' => $submission->id,
             'reviewer_id'   => auth()->id(),
-            'commentaire'   => $request->commentaire ?? "{$refusedCount} ligne(s) refusée(s). Consultez les commentaires sur chaque ligne.",
+            'commentaire'   => $request->commentaire ?? "{$refusedCount} ligne(s) refusée(s).",
             'decision'      => 'REJET',
             'created_at'    => now(),
         ]);
@@ -297,32 +356,5 @@ class ReviewController extends Controller
         $employes    = \App\Models\User::role('employe')->orderBy('name')->get();
 
         return view('superior.submissions.index', compact('submissions', 'employes'));
-    }
-
-    /**
- * Réinitialise une ligne à PENDING pour permettre de la re-traiter.
- */
-    public function resetLine(Request $request, Submission $submission, StagingCorrection $correction)
-    {
-        if (
-            $correction->submission_id !== $submission->id ||
-            $correction->version !== $submission->version
-        ) {
-            return response()->json(['error' => 'Correction invalide.'], 403);
-        }
-
-        // On mémorise l'ancien statut pour que le JS sache
-        // si c'était une validation ou un refus à annuler
-        $ancienStatut = $correction->statut_revision;
-
-        $correction->update([
-            'statut_revision' => 'PENDING',
-            'commentaire_sup' => null,
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'was'     => $ancienStatut, // 'VALIDE' ou 'REFUSE'
-        ]);
     }
 }

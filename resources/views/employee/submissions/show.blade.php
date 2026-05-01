@@ -2,14 +2,8 @@
     ============================================================
     VUE : employee/submissions/show.blade.php
     ------------------------------------------------------------
-    MISE À JOUR : Toutes les colonnes d'une ligne refusée
-    sont maintenant modifiables inline par l'employé.
-
-    Colonnes modifiables sur une ligne REFUSE :
-      - table_db2       → champ texte
-      - cle_primaire    → champ texte
-      - champ           → champ texte
-      - valeur          → champ texte (déjà existant)
+    MISE À JOUR : Ajout du scroll automatique vers la prochaine
+    ligne refusée après chaque correction enregistrée.
     ============================================================
 --}}
 
@@ -41,7 +35,7 @@
                 Version <strong style="color:var(--text-main);">v{{ $submission->version }}</strong>
             </span>
             <span style="font-size:0.8rem; color:var(--text-muted);">
-                <strong style="color:var(--text-main);">{{ $submission->getTotalCorrections() }}</strong> correction(s)
+                <strong style="color:var(--text-main);">{{ count($excelData) }}</strong> ligne(s)
             </span>
         </div>
     </div>
@@ -69,16 +63,17 @@
                 <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
             </svg>
             <strong style="color:#fb923c; font-family:'Syne',sans-serif;">
-                Corrections demandées par le supérieur
+                Corrections demandées — {{ $refusedCount }} ligne(s) à corriger
             </strong>
         </div>
         <p style="font-size:0.875rem; color:var(--text-muted); margin:0 0 16px;">
-            Les lignes en rouge ci-dessous ont été refusées. Cliquez sur une ligne pour modifier
-            toutes ses colonnes, puis re-soumettez le dossier.
+            Les lignes surlignées en rouge ci-dessous ont été refusées par le supérieur.
+            Consultez le commentaire sur chaque ligne et apportez vos corrections directement
+            dans le tableau, puis re-soumettez.
         </p>
 
-        {{-- Barre de progression --}}
-        <div style="margin-bottom:12px;">
+        {{-- Progression --}}
+        <div style="margin-bottom:16px;">
             <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
                 <span style="font-size:0.78rem; color:var(--text-muted);">Progression</span>
                 <span id="progress-text" style="font-size:0.78rem; color:var(--text-muted);">
@@ -90,17 +85,6 @@
                      style="height:100%; border-radius:99px; background:linear-gradient(90deg,#fb923c,#fbbf24); transition:width 0.4s ease;
                             width:{{ $refusedCount > 0 ? round(($correctedCount / $refusedCount) * 100) : 0 }}%;">
                 </div>
-            </div>
-        </div>
-
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px;">
-            <div style="text-align:center; padding:10px; background:rgba(239,68,68,0.08); border-radius:8px;">
-                <div style="font-size:1.3rem; font-weight:800; font-family:'Syne',sans-serif; color:#f87171;">{{ $refusedCount }}</div>
-                <div style="font-size:0.75rem; color:var(--text-muted);">Lignes refusées</div>
-            </div>
-            <div style="text-align:center; padding:10px; background:rgba(34,197,94,0.08); border-radius:8px;">
-                <div id="count-corrected" style="font-size:1.3rem; font-weight:800; font-family:'Syne',sans-serif; color:#4ade80;">{{ $correctedCount }}</div>
-                <div style="font-size:0.75rem; color:var(--text-muted);">Corrigées</div>
             </div>
         </div>
 
@@ -141,143 +125,117 @@
     </div>
 @endif
 
-{{-- TABLEAU DES CORRECTIONS --}}
+{{-- TABLEAU DU FICHIER EXCEL BRUT --}}
 <div class="card" style="margin-bottom:20px;">
 
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
         <h3 style="font-family:'Syne',sans-serif; font-size:1rem; font-weight:700; margin:0;">
-            Corrections — Version {{ $submission->version }}
+            Contenu du fichier — {{ $submission->file_original_name }}
         </h3>
-        <span style="font-size:0.8rem; color:var(--text-muted);">{{ $corrections->total() }} ligne(s)</span>
+        <div style="display:flex; align-items:center; gap:12px;">
+            @if($submission->statut === 'EN_CORRECTION')
+                <div style="display:flex; align-items:center; gap:8px; font-size:0.75rem; color:var(--text-muted);">
+                    <span style="width:10px; height:10px; border-radius:2px; background:rgba(239,68,68,0.3); display:inline-block;"></span> Ligne refusée
+                    <span style="width:10px; height:10px; border-radius:2px; background:rgba(34,197,94,0.3); display:inline-block; margin-left:6px;"></span> Corrigée
+                </div>
+            @endif
+            <span style="font-size:0.8rem; color:var(--text-muted);">{{ count($excelData) }} ligne(s)</span>
+        </div>
     </div>
 
-    @if($corrections->isEmpty())
+    @if(! $fileExists)
         <div style="text-align:center; padding:40px; color:var(--text-muted);">
-            <p style="font-size:0.875rem;">Aucune correction trouvée.</p>
+            <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="margin:0 auto 12px; opacity:0.4;">
+                <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+            <p style="font-size:0.875rem;">Le fichier original n'est plus disponible.</p>
         </div>
+
+    @elseif(empty($excelColumns))
+        <div style="text-align:center; padding:40px; color:var(--text-muted);">
+            <p style="font-size:0.875rem;">Impossible de lire le contenu du fichier.</p>
+        </div>
+
     @else
-
-        {{-- Message d'aide si EN_CORRECTION --}}
-        @if($submission->statut === 'EN_CORRECTION')
-            <div style="padding:10px 14px; background:rgba(79,124,255,0.08); border-radius:8px; margin-bottom:16px; font-size:0.8rem; color:var(--accent-light);">
-                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="display:inline; vertical-align:-2px; margin-right:4px;">
-                    <circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/>
-                </svg>
-                Les lignes <span style="color:#f87171; font-weight:600;">en rouge</span> ont été refusées.
-                Cliquez sur le bouton <strong>✏️ Modifier</strong> pour corriger toutes les colonnes de la ligne.
-            </div>
-        @endif
-
-        <div class="table-wrap">
-            <table>
-                <thead>
+        <div style="overflow-x:auto; overflow-y:auto; max-height:65vh; border-radius:8px;">
+            <table style="border-collapse:collapse; width:100%;">
+                <thead style="position:sticky; top:0; z-index:10;">
                     <tr>
-                        <th>#</th>
-                        <th>Table DB2</th>
-                        <th>Clé primaire</th>
-                        <th>Champ</th>
-                        <th>Valeur</th>
-                        <th>Révision</th>
-                        <th>Push</th>
-                        @if($submission->statut === 'EN_CORRECTION')
-                            <th>Action</th>
+                        <th style="width:50px; background:var(--bg-card); border-bottom:1px solid var(--border);">#</th>
+                        @foreach($excelColumns as $col)
+                            <th style="background:var(--bg-card); border-bottom:1px solid var(--border);">{{ $col }}</th>
+                        @endforeach
+                        @if($submission->statut === 'EN_CORRECTION' || $refusedCount > 0)
+                            <th style="background:var(--bg-card); border-bottom:1px solid var(--border);">Révision</th>
                         @endif
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach($corrections as $correction)
-                        {{-- Ligne principale --}}
-                        <tr id="row-{{ $correction->id }}"
-                            style="{{ $correction->statut_revision === 'REFUSE' ? 'background:rgba(239,68,68,0.04);' : '' }}
-                                   {{ $correction->statut_revision === 'VALIDE' ? 'background:rgba(34,197,94,0.03);' : '' }}">
+                    @php $lineNumber = $firstDataLine; @endphp
+                    @foreach($excelData as $row)
+                        @php
+                            $correction  = $correctionsByLine[$lineNumber] ?? null;
+                            $isRefused   = $correction && $correction->statut_revision === 'REFUSE';
+                            $isValide    = $correction && $correction->statut_revision === 'VALIDE';
+                            $isCorrected = $correction && $correction->isCorrectedByEmployee();
+                        @endphp
 
-                            <td style="color:var(--text-muted); font-size:0.8rem; text-align:center;">{{ $correction->ligne_ref }}</td>
+                        <tr id="row-line-{{ $lineNumber }}"
+                            style="{{ $isRefused && !$isCorrected ? 'background:rgba(239,68,68,0.06);' : '' }}
+                                   {{ $isCorrected ? 'background:rgba(34,197,94,0.04);' : '' }}">
 
-                            {{--
-                                Pour chaque colonne on affiche :
-                                - La valeur corrigée en vert si elle existe
-                                - La valeur originale sinon
-                                Ça permet à l'employé de voir ses corrections appliquées.
-                            --}}
-                            <td>
-                                @if($correction->table_db2_corrigee)
-                                    <span style="color:#4ade80; font-size:0.8rem; font-weight:500;">{{ $correction->table_db2_corrigee }}</span>
-                                    <span style="color:var(--text-muted); font-size:0.72rem; text-decoration:line-through; display:block;">{{ $correction->table_db2 }}</span>
-                                @else
-                                    <code style="background:rgba(79,124,255,0.1); color:var(--accent-light); padding:2px 7px; border-radius:5px; font-size:0.8rem;">{{ $correction->table_db2 }}</code>
-                                @endif
+                            <td style="color:var(--text-muted); font-size:0.75rem; text-align:center; font-weight:500;">
+                                {{ $lineNumber }}
                             </td>
 
-                            <td style="font-size:0.8rem; color:var(--text-muted);">
-                                @if($correction->cle_primaire_corrigee)
-                                    <span style="color:#4ade80; font-weight:500;">{{ $correction->cle_primaire_corrigee }}</span>
-                                    <span style="color:var(--text-muted); font-size:0.72rem; text-decoration:line-through; display:block;">{{ $correction->cle_primaire }}</span>
-                                @else
-                                    {{ $correction->cle_primaire ?? '—' }}
-                                @endif
-                            </td>
-
-                            <td style="font-weight:500;">
-                                @if($correction->champ_corrige)
-                                    <span style="color:#4ade80;">{{ $correction->champ_corrige }}</span>
-                                    <span style="color:var(--text-muted); font-size:0.72rem; text-decoration:line-through; display:block;">{{ $correction->champ }}</span>
-                                @else
-                                    {{ $correction->champ }}
-                                @endif
-                            </td>
-
-                            <td style="font-size:0.875rem;">
-                                @if($correction->valeur_corrigee)
-                                    <span style="color:#4ade80; font-weight:500;">{{ $correction->valeur_corrigee }}</span>
-                                    <span style="color:var(--text-muted); font-size:0.72rem; text-decoration:line-through; display:block;">{{ $correction->valeur_correction }}</span>
-                                @else
-                                    {{ $correction->valeur_correction }}
-                                @endif
-                            </td>
-
-                            {{-- Statut révision + commentaire supérieur --}}
-                            <td>
-                                @if($correction->statut_revision === 'VALIDE')
-                                    <span class="badge badge-emerald">Validé</span>
-                                @elseif($correction->statut_revision === 'REFUSE')
-                                    <span class="badge badge-red">Refusé</span>
-                                    @if($correction->commentaire_sup)
-                                        <div style="margin-top:6px; padding:6px 8px; background:rgba(239,68,68,0.08); border-left:2px solid rgba(239,68,68,0.5); border-radius:0 4px 4px 0; max-width:200px;">
-                                            <p style="font-size:0.72rem; color:#f87171; margin:0; line-height:1.5;">
-                                                <strong>Note :</strong> {{ $correction->commentaire_sup }}
-                                            </p>
-                                        </div>
+                            @foreach($excelColumns as $colIndex => $col)
+                                <td style="font-size:0.8rem;">
+                                    @if($isRefused && $submission->statut === 'EN_CORRECTION')
+                                        <input type="text"
+                                               id="cell-{{ $lineNumber }}-{{ $colIndex }}"
+                                               value="{{ $row[$col] ?? '' }}"
+                                               data-original="{{ $row[$col] ?? '' }}"
+                                               data-col="{{ $col }}"
+                                               data-line="{{ $lineNumber }}"
+                                               oninput="markCellEdited(this)"
+                                               style="width:100%; min-width:80px; padding:3px 6px; background:transparent; border:1px solid transparent; border-radius:4px; color:var(--text-main); font-size:0.8rem; font-family:inherit; transition:border-color 0.18s;"
+                                               onfocus="this.style.borderColor='rgba(251,146,60,0.5)'; this.style.background='var(--bg-main)'"
+                                               onblur="this.style.borderColor='transparent'; this.style.background='transparent'">
+                                    @else
+                                        {{ $row[$col] ?? '—' }}
                                     @endif
-                                    @if($correction->isCorrectedByEmployee())
-                                        <div style="margin-top:4px;">
-                                            <span style="font-size:0.7rem; color:#4ade80;">✓ Corrigé</span>
+                                </td>
+                            @endforeach
+
+                            @if($submission->statut === 'EN_CORRECTION' || $refusedCount > 0)
+                                <td style="min-width:180px;">
+                                    @if($isRefused)
+                                        <div>
+                                            @if($isCorrected)
+                                                <span class="badge badge-emerald" style="font-size:0.7rem;">✓ Corrigé</span>
+                                            @else
+                                                <span class="badge badge-red" style="font-size:0.7rem;">Refusé</span>
+                                            @endif
+
+                                            @if($correction->commentaire_sup)
+                                                <div style="margin-top:6px; padding:5px 7px; background:rgba(239,68,68,0.08); border-left:2px solid rgba(239,68,68,0.5); border-radius:0 4px 4px 0;">
+                                                    <p style="font-size:0.72rem; color:#f87171; margin:0; line-height:1.4;">
+                                                        <strong>Note :</strong> {{ $correction->commentaire_sup }}
+                                                    </p>
+                                                </div>
+                                            @endif
+
+                                            @if($submission->statut === 'EN_CORRECTION')
+                                                <button type="button"
+                                                        id="save-btn-{{ $lineNumber }}"
+                                                        onclick="saveLine({{ $lineNumber }}, {{ $correction->id }})"
+                                                        style="margin-top:8px; padding:4px 10px; background:rgba(251,146,60,0.15); color:#fb923c; border:1px solid rgba(251,146,60,0.3); border-radius:6px; font-size:0.72rem; font-weight:600; cursor:pointer; font-family:inherit; display:none;">
+                                                    ✓ Enregistrer
+                                                </button>
+                                            @endif
                                         </div>
-                                    @endif
-                                @else
-                                    <span class="badge badge-gray">En attente</span>
-                                @endif
-                            </td>
-
-                            {{-- Push statut --}}
-                            <td>
-                                @if($correction->push_statut === 'OK')
-                                    <span class="badge badge-emerald">OK</span>
-                                @elseif($correction->push_statut === 'ERREUR')
-                                    <span class="badge badge-red" title="{{ $correction->push_message }}">Erreur</span>
-                                @else
-                                    <span class="badge badge-gray">—</span>
-                                @endif
-                            </td>
-
-                            {{-- Bouton modifier (seulement pour les lignes refusées) --}}
-                            @if($submission->statut === 'EN_CORRECTION')
-                                <td id="action-{{ $correction->id }}">
-                                    @if($correction->statut_revision === 'REFUSE')
-                                        <button type="button"
-                                                onclick="toggleEditForm({{ $correction->id }})"
-                                                style="padding:5px 10px; background:rgba(79,124,255,0.1); color:var(--accent-light); border:1px solid rgba(79,124,255,0.3); border-radius:7px; font-size:0.78rem; cursor:pointer; font-family:inherit;">
-                                            ✏️ Modifier
-                                        </button>
+                                    @elseif($isValide)
+                                        <span class="badge badge-emerald" style="font-size:0.7rem;">Validé</span>
                                     @else
                                         <span style="font-size:0.75rem; color:var(--text-muted);">—</span>
                                     @endif
@@ -285,115 +243,11 @@
                             @endif
                         </tr>
 
-                        {{--
-                            Formulaire d'édition inline — toutes les colonnes modifiables.
-                            Caché par défaut, affiché au clic sur "Modifier".
-                            Chaque champ est prérempli avec la valeur corrigée si elle existe,
-                            sinon avec la valeur originale.
-                        --}}
-                        @if($submission->statut === 'EN_CORRECTION' && $correction->statut_revision === 'REFUSE')
-                            <tr id="edit-form-{{ $correction->id }}" style="display:none;">
-                                <td colspan="8" style="padding:0 16px 16px; background:rgba(79,124,255,0.04);">
-                                    <div style="padding:16px; border:1px solid rgba(79,124,255,0.2); border-radius:10px; margin-top:4px;">
-
-                                        <p style="font-size:0.8rem; color:var(--accent-light); font-weight:600; margin:0 0 14px;">
-                                            ✏️ Modifier la ligne #{{ $correction->ligne_ref }}
-                                        </p>
-
-                                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
-
-                                            {{-- Champ Table DB2 --}}
-                                            <div>
-                                                <label style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px; display:block;">
-                                                    Table DB2
-                                                    <span style="color:var(--text-muted); font-weight:400;">(original : {{ $correction->table_db2 }})</span>
-                                                </label>
-                                                <input type="text"
-                                                       id="table-{{ $correction->id }}"
-                                                       value="{{ $correction->table_db2_corrigee ?? $correction->table_db2 }}"
-                                                       placeholder="{{ $correction->table_db2 }}"
-                                                       style="width:100%; padding:7px 10px; background:var(--bg-main); border:1px solid var(--border); border-radius:7px; color:var(--text-main); font-size:0.8rem; font-family:inherit;">
-                                            </div>
-
-                                            {{-- Champ Clé primaire --}}
-                                            <div>
-                                                <label style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px; display:block;">
-                                                    Clé primaire
-                                                    <span style="color:var(--text-muted); font-weight:400;">(original : {{ $correction->cle_primaire ?? '—' }})</span>
-                                                </label>
-                                                <input type="text"
-                                                       id="cle-{{ $correction->id }}"
-                                                       value="{{ $correction->cle_primaire_corrigee ?? $correction->cle_primaire }}"
-                                                       placeholder="{{ $correction->cle_primaire ?? 'Ex: ID=1042' }}"
-                                                       style="width:100%; padding:7px 10px; background:var(--bg-main); border:1px solid var(--border); border-radius:7px; color:var(--text-main); font-size:0.8rem; font-family:inherit;">
-                                            </div>
-
-                                            {{-- Champ Champ DB2 --}}
-                                            <div>
-                                                <label style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px; display:block;">
-                                                    Champ
-                                                    <span style="color:var(--text-muted); font-weight:400;">(original : {{ $correction->champ }})</span>
-                                                </label>
-                                                <input type="text"
-                                                       id="champ-{{ $correction->id }}"
-                                                       value="{{ $correction->champ_corrige ?? $correction->champ }}"
-                                                       placeholder="{{ $correction->champ }}"
-                                                       style="width:100%; padding:7px 10px; background:var(--bg-main); border:1px solid var(--border); border-radius:7px; color:var(--text-main); font-size:0.8rem; font-family:inherit;">
-                                            </div>
-
-                                            {{-- Champ Valeur --}}
-                                            <div>
-                                                <label style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px; display:block;">
-                                                    Valeur
-                                                    <span style="color:var(--text-muted); font-weight:400;">(original : {{ $correction->valeur_correction }})</span>
-                                                </label>
-                                                <input type="text"
-                                                       id="valeur-{{ $correction->id }}"
-                                                       value="{{ $correction->valeur_corrigee ?? $correction->valeur_correction }}"
-                                                       placeholder="{{ $correction->valeur_correction }}"
-                                                       style="width:100%; padding:7px 10px; background:var(--bg-main); border:1px solid var(--border); border-radius:7px; color:var(--text-main); font-size:0.8rem; font-family:inherit;">
-                                            </div>
-
-                                        </div>
-
-                                        {{-- Boutons Enregistrer / Annuler --}}
-                                        <div style="display:flex; gap:8px; justify-content:flex-end;">
-                                            <button type="button"
-                                                    onclick="toggleEditForm({{ $correction->id }})"
-                                                    style="padding:6px 14px; background:transparent; color:var(--text-muted); border:1px solid var(--border); border-radius:7px; font-size:0.78rem; cursor:pointer; font-family:inherit;">
-                                                Annuler
-                                            </button>
-                                            <button type="button"
-                                                    onclick="saveLine({{ $correction->id }})"
-                                                    style="padding:6px 14px; background:rgba(79,124,255,0.15); color:var(--accent-light); border:1px solid rgba(79,124,255,0.3); border-radius:7px; font-size:0.78rem; font-weight:600; cursor:pointer; font-family:inherit;">
-                                                ✓ Enregistrer les corrections
-                                            </button>
-                                        </div>
-
-                                    </div>
-                                </td>
-                            </tr>
-                        @endif
-
-                        {{-- Message erreur push --}}
-                        @if($correction->push_statut === 'ERREUR' && $correction->push_message)
-                            <tr>
-                                <td colspan="8" style="padding:4px 16px 10px; background:rgba(239,68,68,0.04);">
-                                    <span style="font-size:0.75rem; color:#f87171;">↳ {{ $correction->push_message }}</span>
-                                </td>
-                            </tr>
-                        @endif
-
+                        @php $lineNumber++; @endphp
                     @endforeach
                 </tbody>
             </table>
         </div>
-
-        @if($corrections->hasPages())
-            <div style="margin-top:16px; display:flex; justify-content:center;">
-                {{ $corrections->links() }}
-            </div>
-        @endif
     @endif
 </div>
 
@@ -457,31 +311,107 @@
     let correctedCount  = {{ $correctedCount }};
 
     /**
-     * Affiche ou cache le formulaire d'édition inline d'une ligne.
+     * Scrolle automatiquement vers la prochaine ligne refusée
+     * non encore corrigée, après qu'une ligne a été enregistrée.
+     *
+     * On cherche toutes les lignes du tableau dont la cellule
+     * de révision contient encore le badge "Refusé" (pas "Corrigé").
+     * On prend la première qui vient APRÈS la ligne courante.
+     *
+     * Exemple : lignes refusées = 4, 10, 34
+     * Après correction de la ligne 4 → scroll vers ligne 10
+     * Après correction de la ligne 10 → scroll vers ligne 34
+     *
+     * @param {number} currentLineNumber - numéro de la ligne qui vient d'être corrigée
      */
-    function toggleEditForm(correctionId) {
-        const form = document.getElementById(`edit-form-${correctionId}`);
-        if (form.style.display === 'none') {
-            form.style.display = 'table-row';
-        } else {
-            form.style.display = 'none';
+    function scrollToNextRefused(currentLineNumber) {
+        /*
+         * On récupère toutes les lignes du tableau identifiées
+         * par leur id "row-line-XX".
+         */
+        const allRows = document.querySelectorAll('tbody tr[id^="row-line-"]');
+        let nextRefusedRow = null;
+
+        for (const row of allRows) {
+            const rowNum = parseInt(row.id.replace('row-line-', ''));
+
+            // On ne s'intéresse qu'aux lignes APRÈS la ligne courante
+            if (rowNum <= currentLineNumber) continue;
+
+            /*
+             * On vérifie si cette ligne est encore refusée et
+             * pas encore corrigée. On cherche le badge "Refusé"
+             * dans la dernière cellule de la ligne.
+             * Si le badge est "✓ Corrigé" on passe à la suivante.
+             */
+            const lastCell = row.querySelector('td:last-child');
+            if (lastCell) {
+                const badgeRed = lastCell.querySelector('.badge-red');
+                if (badgeRed && badgeRed.textContent.includes('Refusé')) {
+                    nextRefusedRow = row;
+                    break;
+                }
+            }
+        }
+
+        if (nextRefusedRow) {
+            /*
+             * Scroll fluide vers la prochaine ligne refusée.
+             * block: 'center' place la ligne au milieu de l'écran.
+             */
+            nextRefusedRow.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+
+            /*
+             * Effet de surbrillance orange pendant 800ms
+             * pour attirer l'attention sur la prochaine ligne à corriger.
+             * On utilise orange (couleur EN_CORRECTION) pour rester
+             * cohérent avec le thème de cette étape.
+             */
+            nextRefusedRow.style.background = 'rgba(251,146,60,0.15)';
+            setTimeout(() => {
+                // Restaure la couleur rouge de base pour les lignes refusées
+                nextRefusedRow.style.background = 'rgba(239,68,68,0.06)';
+            }, 800);
         }
     }
 
-    /**
-     * Enregistre toutes les corrections d'une ligne via PATCH.
-     * Envoie les 4 colonnes modifiables au serveur.
-     */
-    async function saveLine(correctionId) {
-        const table  = document.getElementById(`table-${correctionId}`)?.value.trim();
-        const cle    = document.getElementById(`cle-${correctionId}`)?.value.trim();
-        const champ  = document.getElementById(`champ-${correctionId}`)?.value.trim();
-        const valeur = document.getElementById(`valeur-${correctionId}`)?.value.trim();
+    function markCellEdited(input) {
+        const lineNumber = input.dataset.line;
+        const saveBtn    = document.getElementById(`save-btn-${lineNumber}`);
+        const original   = input.dataset.original;
 
-        if (!table && !cle && !champ && !valeur) {
-            alert('Veuillez renseigner au moins une correction.');
-            return;
+        if (saveBtn) {
+            const hasChanges = Array.from(
+                document.querySelectorAll(`input[data-line="${lineNumber}"]`)
+            ).some(inp => inp.value !== inp.dataset.original);
+            saveBtn.style.display = hasChanges ? 'inline-block' : 'none';
         }
+
+        if (input.value !== original) {
+            input.style.color = '#fb923c';
+        } else {
+            input.style.color = 'var(--text-main)';
+        }
+    }
+
+    async function saveLine(lineNumber, correctionId) {
+        const cells = document.querySelectorAll(`input[data-line="${lineNumber}"]`);
+
+        const values = {};
+        cells.forEach((cell, index) => {
+            values[`col_${index}`] = cell.value.trim();
+        });
+
+        const colKeys = Object.keys(values);
+        const payload = {
+            table_db2_corrigee:    colKeys[0] ? values[colKeys[0]] : null,
+            cle_primaire_corrigee: colKeys[1] ? values[colKeys[1]] : null,
+            champ_corrige:         colKeys[2] ? values[colKeys[2]] : null,
+            valeur_corrigee:       colKeys[3] ? values[colKeys[3]] : null,
+        };
 
         try {
             const response = await fetch(`${BASE_URL}/${correctionId}`, {
@@ -491,33 +421,45 @@
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                 },
-                body: JSON.stringify({
-                    table_db2_corrigee:    table  || null,
-                    cle_primaire_corrigee: cle    || null,
-                    champ_corrige:         champ  || null,
-                    valeur_corrigee:       valeur || null,
-                }),
+                body: JSON.stringify(payload),
             });
 
             const data = await response.json();
 
             if (data.success) {
-                // Cache le formulaire
-                toggleEditForm(correctionId);
+                const saveBtn = document.getElementById(`save-btn-${lineNumber}`);
+                if (saveBtn) saveBtn.style.display = 'none';
 
-                // Recharge la ligne visuellement — on recharge la page
-                // pour afficher les valeurs corrigées en vert avec barré
-                const wasAlreadyCorrected = document.getElementById(`row-${correctionId}`)
-                    .dataset.corrected === 'true';
+                // Coloration verte de la ligne corrigée
+                document.getElementById(`row-line-${lineNumber}`).style.background = 'rgba(34,197,94,0.04)';
 
+                // Mise à jour du badge : Refusé → ✓ Corrigé
+                const lastCell = document.querySelector(`#row-line-${lineNumber} td:last-child`);
+                if (lastCell) {
+                    const badgeRed = lastCell.querySelector('.badge-red');
+                    if (badgeRed) {
+                        badgeRed.className    = 'badge badge-emerald';
+                        badgeRed.style.fontSize = '0.7rem';
+                        badgeRed.textContent  = '✓ Corrigé';
+                    }
+                }
+
+                // Mise à jour du compteur
+                const wasAlreadyCorrected = document.getElementById(`row-line-${lineNumber}`).dataset.corrected === 'true';
                 if (!wasAlreadyCorrected) {
                     correctedCount++;
-                    document.getElementById(`row-${correctionId}`).dataset.corrected = 'true';
+                    document.getElementById(`row-line-${lineNumber}`).dataset.corrected = 'true';
                     updateProgress();
                 }
 
-                // Recharge la page pour afficher les nouvelles valeurs
-                window.location.reload();
+                /*
+                 * Scroll automatique vers la prochaine ligne refusée.
+                 * Appelé après chaque enregistrement réussi.
+                 * Guide l'employé directement vers la prochaine
+                 * ligne qui nécessite son attention.
+                 */
+                scrollToNextRefused(lineNumber);
+
             } else {
                 alert(data.error ?? 'Une erreur est survenue.');
             }
@@ -527,27 +469,26 @@
         }
     }
 
-    /**
-     * Met à jour la barre de progression et le bouton re-soumettre.
-     */
     function updateProgress() {
         const progressBar  = document.getElementById('progress-bar');
         const progressText = document.getElementById('progress-text');
-        const countEl      = document.getElementById('count-corrected');
         const btnResubmit  = document.getElementById('btn-resubmit');
 
         if (progressBar) {
             const pct = REFUSED_TOTAL > 0 ? Math.round((correctedCount / REFUSED_TOTAL) * 100) : 0;
             progressBar.style.width = pct + '%';
         }
-        if (progressText) progressText.textContent = `${correctedCount} / ${REFUSED_TOTAL} ligne(s) corrigée(s)`;
-        if (countEl) countEl.textContent = correctedCount;
-
+        if (progressText) {
+            progressText.textContent = `${correctedCount} / ${REFUSED_TOTAL} ligne(s) corrigée(s)`;
+        }
         if (btnResubmit) {
             const allDone = correctedCount >= REFUSED_TOTAL;
             btnResubmit.disabled      = !allDone;
             btnResubmit.style.opacity = allDone ? '1' : '0.4';
             btnResubmit.style.cursor  = allDone ? 'pointer' : 'not-allowed';
+            btnResubmit.innerHTML     = allDone
+                ? `<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Re-soumettre le dossier corrigé`
+                : `<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Re-soumettre (${REFUSED_TOTAL - correctedCount} ligne(s) restante(s))`;
         }
     }
 

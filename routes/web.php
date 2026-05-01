@@ -118,16 +118,14 @@ Route::middleware(['auth', 'check.active'])->group(function () {
         Route::get('/export/pdf',   [AuditLogController::class, 'exportPdf'])->name('export.pdf');
     });
 
-   Route::get('/debug-resubmit/{submission}', function ($id) {
+   Route::get('/debug-submission/{id}', function ($id) {
         $submission = \App\Models\Submission::findOrFail($id);
         return response()->json([
-            'statut'      => $submission->statut,
-            'corrections' => $submission->corrections()
-                ->where('version', $submission->version)
-                ->get(['id', 'ligne_ref', 'statut_revision', 'valeur_correction', 'valeur_corrigee', 'table_db2_corrigee', 'champ_corrige', 'cle_primaire_corrigee'])
+            'total_corrections' => $submission->corrections()->count(),
+            'version'           => $submission->version,
+            'statut'            => $submission->statut,
         ]);
     })->middleware('auth');
-
 });
 
 // ──────────────────────────────────────────────────────────────────

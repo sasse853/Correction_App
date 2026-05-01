@@ -12,20 +12,27 @@ use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use App\Models\User;
+use Rap2hpoutre\FastExcel\FastExcel;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
 /**
  * SubmissionController
  *
- * NOUVELLES MÉTHODES :
- *   - destroy()     → supprime un dossier EN_ATTENTE
- *   - correctLine() → l'employé corrige une ligne refusée
- *                     directement sur la plateforme
+ * MISE À JOUR de show() :
+ * Utilise PhpSpreadsheet (v5.7, compatible PHP 8.5) pour lire
+ * le fichier Excel brut et afficher son contenu exact,
+ * même si le fichier a un titre sur la première ligne,
+ * des cellules fusionnées, ou plusieurs lignes d'en-têtes.
+ *
+ * Stratégie de lecture :
+ *   1. On charge le fichier avec IOFactory::load()
+ *   2. On lit toutes les lignes du fichier
+ *   3. On détecte automatiquement la ligne d'en-têtes :
+ *      c'est la première ligne qui contient au moins 3 colonnes remplies
+ *   4. On construit le tableau associatif à partir de là
  */
 class SubmissionController extends Controller
 {
-    /**
-     * Liste les dossiers de l'employé connecté.
-     */
     public function index()
     {
         $submissions = Submission::where('user_id', auth()->id())
@@ -35,17 +42,11 @@ class SubmissionController extends Controller
         return view('employee.submissions.index', compact('submissions'));
     }
 
-    /**
-     * Formulaire d'upload.
-     */
     public function create()
     {
         return view('employee.submissions.create');
     }
 
-    /**
-     * Traite l'upload et le parsing du fichier Excel.
-     */
     public function store(Request $request)
     {
         $request->validate([
@@ -96,6 +97,9 @@ class SubmissionController extends Controller
 
     /**
      * Affiche le détail d'un dossier (vue employé).
+     *
+     * Lit le fichier Excel avec PhpSpreadsheet pour afficher
+     * le contenu exact, toutes colonnes confondues.
      */
     public function show(Submission $submission)
     {
@@ -106,15 +110,10 @@ class SubmissionController extends Controller
         $corrections = $submission->corrections()
             ->where('version', $submission->version)
             ->orderBy('ligne_ref')
-            ->paginate(20);
+            ->get();
 
         $reviews = $submission->reviews()->with('reviewer')->orderByDesc('created_at')->get();
 
-        /*
-         * Compteurs pour informer l'employé de l'état de la révision.
-         * Utiles quand le dossier est EN_CORRECTION pour qu'il sache
-         * combien de lignes il doit corriger.
-         */
         $refusedCount = $submission->corrections()
             ->where('version', $submission->version)
             ->where('statut_revision', 'REFUSE')
@@ -123,30 +122,111 @@ class SubmissionController extends Controller
         $correctedCount = $submission->corrections()
             ->where('version', $submission->version)
             ->where('statut_revision', 'REFUSE')
-            ->whereNotNull('valeur_corrigee')
+            ->where(function($q) {
+                $q->whereNotNull('valeur_corrigee')
+                  ->orWhereNotNull('table_db2_corrigee')
+                  ->orWhereNotNull('champ_corrige')
+                  ->orWhereNotNull('cle_primaire_corrigee');
+            })
             ->count();
+
+        // Lecture du fichier Excel brut avec PhpSpreadsheet
+        $excelData    = [];
+        $excelColumns = [];
+        $fileExists   = false;
+
+        try {
+            $cheminAbsolu = storage_path('app/private/' . $submission->file_path);
+
+            // Fallback si le fichier est stocké sans /private/
+            if (! file_exists($cheminAbsolu)) {
+                $cheminAbsolu = storage_path('app/' . $submission->file_path);
+            }
+
+            if (file_exists($cheminAbsolu)) {
+                $fileExists  = true;
+                $spreadsheet = IOFactory::load($cheminAbsolu);
+                $feuille     = $spreadsheet->getActiveSheet();
+                $toutesLignes = $feuille->toArray(null, true, true, false);
+
+                /*
+                 * Détection automatique de la ligne d'en-têtes.
+                 * On cherche la première ligne qui contient
+                 * au moins 3 colonnes non vides.
+                 * Cela permet de gérer les fichiers avec un titre
+                 * sur la première ligne (comme ton fichier).
+                 */
+                $indexEntetes = null;
+                foreach ($toutesLignes as $i => $ligne) {
+                    $colonnesRemplies = count(array_filter(
+                        $ligne,
+                        fn($v) => !is_null($v) && $v !== ''
+                    ));
+                    if ($colonnesRemplies >= 3) {
+                        $indexEntetes = $i;
+                        break;
+                    }
+                }
+                $firstDataLine = ($indexEntetes !== null) ? $indexEntetes + 2 : 2;
+
+                if ($indexEntetes !== null) {
+                    /*
+                     * Les en-têtes = la ligne détectée.
+                     * On ne garde que les colonnes non vides pour
+                     * éviter les colonnes fantômes.
+                     */
+                    $rawEntetes   = $toutesLignes[$indexEntetes];
+                    $excelColumns = array_values(array_filter(
+                        $rawEntetes,
+                        fn($v) => !is_null($v) && $v !== ''
+                    ));
+                    $nbColonnes   = count($excelColumns);
+
+                    // Les données = toutes les lignes après les en-têtes
+                    $lignesDonnees = array_slice($toutesLignes, $indexEntetes + 1);
+
+                    foreach ($lignesDonnees as $ligne) {
+                        $valeurs = array_values($ligne);
+
+                        // Ignore les lignes complètement vides
+                        if (empty(array_filter($valeurs, fn($v) => !is_null($v) && $v !== ''))) {
+                            continue;
+                        }
+
+                        /*
+                         * Construit un tableau associatif :
+                         * clé = nom de colonne, valeur = cellule
+                         * On tronque ou complète pour avoir exactement
+                         * $nbColonnes valeurs.
+                         */
+                        $excelData[] = array_combine(
+                            $excelColumns,
+                            array_slice(
+                                array_pad($valeurs, $nbColonnes, ''),
+                                0,
+                                $nbColonnes
+                            )
+                        );
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            $excelData    = [];
+            $excelColumns = [];
+        }
+
+        // Indexation des corrections par ligne_ref pour la vue
+        $correctionsByLine = $corrections->keyBy('ligne_ref');
 
         return view('employee.submissions.show', compact(
             'submission', 'corrections', 'reviews',
-            'refusedCount', 'correctedCount'
+            'refusedCount', 'correctedCount',
+            'excelData', 'excelColumns', 'fileExists',
+            'correctionsByLine',
+            'firstDataLine'
         ));
     }
 
-    /**
-     * Supprime un dossier soumis par l'employé.
-     *
-     * DELETE /employe/submissions/{submission}
-     *
-     * Conditions :
-     *   - Le dossier doit appartenir à l'employé connecté
-     *   - Le statut doit être EN_ATTENTE uniquement
-     *     (impossible de supprimer un dossier déjà en révision)
-     *
-     * Supprime :
-     *   - Le fichier Excel stocké sur le disque
-     *   - Les corrections parsées dans staging_corrections
-     *   - Le dossier dans submissions
-     */
     public function destroy(Submission $submission)
     {
         if ($submission->user_id !== auth()->id()) {
@@ -159,14 +239,8 @@ class SubmissionController extends Controller
             ]);
         }
 
-        // Suppression du fichier Excel physique
         Storage::disk('local')->delete($submission->file_path);
-
-        // Les corrections liées sont supprimées automatiquement
-        // grâce à la contrainte onDelete('cascade') en migration.
-        // Si ce n'est pas le cas, on les supprime manuellement :
         $submission->corrections()->delete();
-
         $submission->delete();
 
         AuditLog::record('UPLOAD', 'OK', [
@@ -178,85 +252,53 @@ class SubmissionController extends Controller
             ->with('success', "Le dossier \"{$submission->file_original_name}\" a été supprimé.");
     }
 
-    /**
-     * L'employé corrige une ligne refusée directement sur la plateforme.
-     *
-     * PATCH /employe/submissions/{submission}/corrections/{correction}
-     *
-     * Met à jour valeur_corrigee sur la StagingCorrection.
-     * La ligne reste en statut_revision = REFUSE jusqu'à ce que
-     * le supérieur la revalide au prochain cycle.
-     *
-     * Retourne JSON pour mise à jour dynamique de l'interface.
-     */
     public function correctLine(Request $request, Submission $submission, StagingCorrection $correction)
     {
         if ($submission->user_id !== auth()->id()) {
             return response()->json(['error' => 'Accès non autorisé.'], 403);
         }
- 
+
         if ($submission->statut !== 'EN_CORRECTION') {
             return response()->json(['error' => 'Ce dossier ne peut pas être modifié.'], 422);
         }
- 
+
         if (
             $correction->submission_id !== $submission->id ||
             $correction->version !== $submission->version
         ) {
             return response()->json(['error' => 'Correction invalide.'], 403);
         }
- 
+
         if ($correction->statut_revision !== 'REFUSE') {
             return response()->json(['error' => 'Cette ligne ne nécessite pas de correction.'], 422);
         }
- 
-        /*
-         * Validation : au moins une colonne doit être renseignée.
-         * Toutes sont facultatives individuellement car l'employé
-         * ne corrige que ce qui est nécessaire.
-         */
+
         $request->validate([
             'valeur_corrigee'       => ['nullable', 'string', 'max:500'],
             'table_db2_corrigee'    => ['nullable', 'string', 'max:100'],
             'cle_primaire_corrigee' => ['nullable', 'string', 'max:100'],
             'champ_corrige'         => ['nullable', 'string', 'max:100'],
         ]);
- 
-        /*
-         * On ne met à jour que les colonnes qui ont été renseignées.
-         * Si l'employé laisse une colonne vide, on garde l'ancienne valeur.
-         * array_filter(null check) évite d'écraser avec null.
-         */
+
         $updates = array_filter([
             'valeur_corrigee'       => $request->valeur_corrigee       ? trim($request->valeur_corrigee) : null,
             'table_db2_corrigee'    => $request->table_db2_corrigee    ? strtoupper(trim($request->table_db2_corrigee)) : null,
             'cle_primaire_corrigee' => $request->cle_primaire_corrigee ? trim($request->cle_primaire_corrigee) : null,
             'champ_corrige'         => $request->champ_corrige         ? strtoupper(trim($request->champ_corrige)) : null,
         ], fn($v) => !is_null($v));
- 
+
         if (empty($updates)) {
             return response()->json(['error' => 'Aucune correction fournie.'], 422);
         }
- 
+
         $correction->update($updates);
- 
+
         return response()->json([
-            'success'               => true,
-            'valeur_corrigee'       => $correction->fresh()->valeur_corrigee,
-            'table_db2_corrigee'    => $correction->fresh()->table_db2_corrigee,
-            'cle_primaire_corrigee' => $correction->fresh()->cle_primaire_corrigee,
-            'champ_corrige'         => $correction->fresh()->champ_corrige,
-            'message'               => 'Corrections enregistrées.',
+            'success' => true,
+            'message' => 'Corrections enregistrées.',
         ]);
     }
 
-    /**
-     * Re-soumission globale après que toutes les lignes
-     * refusées ont été corrigées par l'employé.
-     *
-     * Vérifie qu'il ne reste plus de lignes REFUSE sans valeur_corrigee
-     * avant de repasser le dossier en EN_ATTENTE.
-     */
     public function resubmit(Request $request, Submission $submission)
     {
         if ($submission->user_id !== auth()->id()) {
@@ -267,24 +309,23 @@ class SubmissionController extends Controller
             return back()->withErrors(['error' => 'Ce dossier ne peut pas être re-soumis.']);
         }
 
-        /*
-         * Vérification : toutes les lignes refusées doivent avoir
-         * une valeur_corrigee avant de re-soumettre.
-         */
         $uncorrectedLines = $submission->corrections()
             ->where('version', $submission->version)
             ->where('statut_revision', 'REFUSE')
-            ->whereNull('valeur_corrigee')
+            ->where(function($q) {
+                $q->whereNull('valeur_corrigee')
+                  ->whereNull('table_db2_corrigee')
+                  ->whereNull('champ_corrige')
+                  ->whereNull('cle_primaire_corrigee');
+            })
             ->count();
 
         if ($uncorrectedLines > 0) {
             return back()->withErrors([
-                'error' => "Impossible de re-soumettre : {$uncorrectedLines} ligne(s) refusée(s) n'ont pas encore été corrigées.",
+                'error' => "Impossible de re-soumettre : {$uncorrectedLines} ligne(s) non corrigée(s).",
             ]);
         }
 
-        // Repasse le dossier en EN_ATTENTE pour que le supérieur
-        // puisse revoir les lignes corrigées
         $submission->update(['statut' => 'EN_ATTENTE']);
 
         $superieurs = User::role('superieur')->where('is_active', true)->get();
